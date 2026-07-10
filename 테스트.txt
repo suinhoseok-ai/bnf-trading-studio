@@ -1,0 +1,6 @@
+cd C:\02.클로드\01.테스트\98.BNF
+npm run dev
+
+
+
+http://localhost:5173/

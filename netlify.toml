@@ -1,0 +1,16 @@
+[build]
+  command = "npm run build"
+  publish = "dist"
+  functions = "netlify/functions"
+
+# Yahoo Finance 프록시 (프로덕션)
+[[redirects]]
+  from = "/api/yahoo/*"
+  to = "/.netlify/functions/yahoo/:splat"
+  status = 200
+
+# SPA 라우팅 fallback
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
