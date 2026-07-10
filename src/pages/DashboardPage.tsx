@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchIndexQuote, fetchCandles, KOSPI_STOCKS, KOSDAQ_STOCKS } from '../lib/marketData';
+import { fetchIndexQuote, fetchCandles, fetchQuote, KOSPI_STOCKS, KOSDAQ_STOCKS } from '../lib/marketData';
 import { getStrategy, initStrategy } from '../lib/strategies';
 import type { StratScan, Tone } from '../lib/strategies/types';
 import { useAuth } from '../context/AuthContext';
@@ -18,6 +18,7 @@ export default function DashboardPage() {
   const { profile, guestMode, allowedStrategyCodes } = useAuth();
   const [stratCode, setStratCode] = useStrategySelection();
   const [indices, setIndices] = useState<IndexQuote[]>([]);
+  const [stockQuotes, setStockQuotes] = useState<IndexQuote[]>([]);
   const [signals, setSignals] = useState<StratScan[]>([]);
   const [account, setAccount] = useState<{ cash: number; initial: number; posCount: number } | null>(null);
   const [scanning, setScanning] = useState(true);
@@ -38,6 +39,14 @@ export default function DashboardPage() {
       { label: 'KOSDAQ', price: kosdaq.price, changePct: kosdaq.changePct },
     ]);
     if (kospi.demo) setDemo(true);
+
+    // 대표 종목 (삼성전자·SK하이닉스) 현재가·등락
+    const [samsung, hynix] = await Promise.all([fetchQuote('005930.KS'), fetchQuote('000660.KS')]);
+    setStockQuotes([
+      { label: '삼성전자', price: samsung.price, changePct: samsung.changePct },
+      { label: 'SK하이닉스', price: hynix.price, changePct: hynix.changePct },
+    ]);
+    if (samsung.demo) setDemo(true);
 
     // 오늘 신호: 주요 종목 상위 간이 스캔 (선택 전략)
     const universe = [...KOSPI_STOCKS.slice(0, 6), ...KOSDAQ_STOCKS.slice(0, 2)];
@@ -93,14 +102,23 @@ export default function DashboardPage() {
         </div>
       )}
 
-      {/* 지수 + 계좌 카드 */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+      {/* 지수 + 대표종목 + 계좌 카드 */}
+      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
         {indices.map((ix) => (
           <div key={ix.label} className="card">
             <div className="text-xs text-slate-400">{ix.label}</div>
             <div className="text-xl font-bold text-white mt-1">{ix.price.toLocaleString('ko-KR', { maximumFractionDigits: 2 })}</div>
             <div className={`text-sm mt-0.5 ${ix.changePct >= 0 ? 'text-up' : 'text-down'}`}>
               {ix.changePct >= 0 ? '▲' : '▼'} {Math.abs(ix.changePct).toFixed(2)}%
+            </div>
+          </div>
+        ))}
+        {stockQuotes.map((s) => (
+          <div key={s.label} className="card">
+            <div className="text-xs text-slate-400">{s.label}</div>
+            <div className="text-xl font-bold text-white mt-1">{s.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}</div>
+            <div className={`text-sm mt-0.5 ${s.changePct >= 0 ? 'text-up' : 'text-down'}`}>
+              {s.changePct >= 0 ? '▲' : '▼'} {Math.abs(s.changePct).toFixed(2)}%
             </div>
           </div>
         ))}

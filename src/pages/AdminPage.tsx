@@ -33,6 +33,7 @@ export default function AdminPage() {
   const [msg, setMsg] = useState('');
   const [report, setReport] = useState<AdminConfig>(DEFAULT_REPORT);
   const [savingReport, setSavingReport] = useState(false);
+  const [sendingReport, setSendingReport] = useState<'daily' | 'full' | null>(null);
   const setRep = <K extends keyof AdminConfig>(k: K, v: AdminConfig[K]) => setReport((prev) => ({ ...prev, [k]: v }));
 
   const load = async () => {
@@ -51,6 +52,30 @@ export default function AdminPage() {
     await supabase.from('bnf_admin_config').update({ config: report, updated_at: new Date().toISOString() }).eq('id', 1);
     setSavingReport(false);
     flash('리포트 설정 저장 완료');
+  };
+  const sendNow = async (type: 'daily' | 'full') => {
+    // 저장되지 않은 설정이 있을 수 있으므로 먼저 저장
+    await supabase.from('bnf_admin_config').update({ config: report, updated_at: new Date().toISOString() }).eq('id', 1);
+    const recipient = type === 'daily' ? report.reportRecipient : report.fullReportRecipient;
+    if (!recipient) { flash(`${type === 'daily' ? '일일' : '전체'} 리포트 수신 이메일을 먼저 입력·저장하세요.`); return; }
+    setSendingReport(type);
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) { flash('로그인이 필요합니다.'); return; }
+      const res = await fetch('/api/run-report', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, accessToken: token }),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (res.ok && j.ok) flash(`${type === 'daily' ? '일일' : '전체'} 리포트를 ${j.recipient}로 발송했습니다.`);
+      else flash(`발송 실패: ${j.error ?? `HTTP ${res.status}`}`);
+    } catch (e) {
+      flash(`발송 실패: ${String(e)}`);
+    } finally {
+      setSendingReport(null);
+    }
   };
   const toggleDay = (d: number) => {
     const cur = report.reportDays ?? [];
@@ -333,6 +358,9 @@ export default function AdminPage() {
             <label className="text-xs text-slate-400 block mb-1">수신 이메일</label>
             <input className="input" type="email" value={report.reportRecipient ?? ''} onChange={(e) => setRep('reportRecipient', e.target.value)} placeholder="you@example.com" />
           </div>
+          <button className="btn-ghost" onClick={() => sendNow('daily')} disabled={sendingReport !== null}>
+            {sendingReport === 'daily' ? '발송 중...' : '📧 일일 리포트 지금 보내기'}
+          </button>
 
           {/* ── 전체 리포트 메일 (전 전략 × 주요 종목) ── */}
           <div className="border-t border-edge pt-4 space-y-4">
@@ -367,6 +395,9 @@ export default function AdminPage() {
                 <input className="input" type="email" value={report.fullReportRecipient ?? ''} onChange={(e) => setRep('fullReportRecipient', e.target.value)} placeholder="you@example.com" />
               </div>
             </div>
+            <button className="btn-ghost" onClick={() => sendNow('full')} disabled={sendingReport !== null}>
+              {sendingReport === 'full' ? '발송 중... (전 전략 스캔, 최대 1분)' : '📧 전체 리포트 지금 보내기'}
+            </button>
           </div>
 
           <button className="btn-primary" onClick={saveReport} disabled={savingReport}>
