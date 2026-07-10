@@ -1,30 +1,38 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchCandles, KOSPI_STOCKS, KOSDAQ_STOCKS, stockName } from '../lib/marketData';
-import { calcIndicators } from '../lib/indicators';
-import { scoreSymbol } from '../lib/scanner';
-import type { ScanResult, StockDef } from '../lib/types';
+import { fetchCandles, universeStocks, UNIVERSE_OPTIONS, stockName } from '../lib/marketData';
+import { getStrategy, initStrategy } from '../lib/strategies';
+import type { StratScan, Tone } from '../lib/strategies/types';
+import type { StockDef } from '../lib/types';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import { ollamaChat, ruleBasedAnalysis } from '../lib/ollama';
 import { useOllamaConfig } from '../hooks/useOllamaConfig';
+import { useStrategySelection } from '../hooks/useStrategySelection';
+import StrategyPicker from '../components/StrategyPicker';
 import Stars from '../components/Stars';
 
-type Universe = 'KOSPI' | 'KOSDAQ' | 'WATCH';
+const toneCls = (t?: Tone) =>
+  t === 'up' ? 'text-up' : t === 'down' ? 'text-down' : t === 'accent' ? 'text-accent' : t === 'muted' ? 'text-slate-500' : 'text-slate-200';
 
 export default function ScannerPage() {
   const { profile, guestMode, allowedStrategyCodes } = useAuth();
-  const [universe, setUniverse] = useState<Universe>('KOSPI');
-  const [results, setResults] = useState<ScanResult[]>([]);
+  const [stratCode, setStratCode] = useStrategySelection();
+  const [universe, setUniverse] = useState('KOSPI');
+  const [results, setResults] = useState<StratScan[]>([]);
+  const [scanList, setScanList] = useState<StockDef[]>([]);
+  const [scanned, setScanned] = useState(0);
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState('');
+  const BATCH = 20;
   const [watchlist, setWatchlist] = useState<{ symbol: string; name: string }[]>([]);
-  const [aiTarget, setAiTarget] = useState<ScanResult | null>(null);
+  const [aiTarget, setAiTarget] = useState<StratScan | null>(null);
   const [aiText, setAiText] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
   const [ollamaConfig] = useOllamaConfig();
 
-  const bnfEnabled = allowedStrategyCodes.includes('bnf1');
+  const mod = getStrategy(stratCode);
+  const enabled = allowedStrategyCodes.includes(stratCode);
 
   const loadWatchlist = async () => {
     if (guestMode) {
@@ -50,48 +58,62 @@ export default function ScannerPage() {
     await loadWatchlist();
   };
 
-  const runScan = async () => {
-    if (!bnfEnabled) return;
+  /** list[from .. from+BATCH] 구간을 스캔해 기존 결과에 누적 */
+  const scanBatch = async (list: StockDef[], from: number, prev: StratScan[]) => {
     setScanning(true);
-    setResults([]);
-    const list: StockDef[] =
-      universe === 'KOSPI' ? KOSPI_STOCKS
-      : universe === 'KOSDAQ' ? KOSDAQ_STOCKS
-      : watchlist.map((w) => ({ symbol: w.symbol, name: w.name || stockName(w.symbol), market: 'KOSPI' as const }));
-
-    const out: ScanResult[] = [];
-    for (let i = 0; i < list.length; i++) {
+    await initStrategy(mod); // 시장 지수 등 준비 (전략6)
+    const out = [...prev];
+    const to = Math.min(from + BATCH, list.length);
+    for (let i = from; i < to; i++) {
       const s = list[i];
       setProgress(`${i + 1}/${list.length} · ${s.name} 분석 중...`);
       try {
-        const { candles } = await fetchCandles(s.symbol, '15m', '60d');
-        const rows = calcIndicators(candles);
-        out.push(scoreSymbol(s.symbol, s.name, rows));
+        const { candles } = await fetchCandles(s.symbol, mod.interval, mod.range);
+        out.push(mod.scan(s.symbol, s.name, mod.compute(candles)));
       } catch (e) {
-        out.push({ symbol: s.symbol, name: s.name, price: 0, changePct: 0, bandwidth: null, bwPctRank: null, isSqueezed: false, belowLower: false, score: 0, stars: 1, conditions: [], error: String(e) });
+        out.push({ symbol: s.symbol, name: s.name, price: 0, changePct: 0, buy: false, exit: false, score: 0, stars: 1, cols: mod.colHeaders.map(() => ({ value: '-' })), conditions: [], error: String(e) });
       }
       setResults([...out].sort((a, b) => b.score - a.score));
     }
+    setScanned(to);
     setProgress('');
     setScanning(false);
   };
 
-  const analyzeWithAI = async (r: ScanResult) => {
+  const runScan = async () => {
+    if (!enabled) return;
+    const list: StockDef[] =
+      universe === 'WATCH'
+        ? watchlist.map((w) => ({ symbol: w.symbol, name: w.name || stockName(w.symbol), market: 'KOSPI' as const }))
+        : universeStocks(universe);
+    setScanList(list);
+    setResults([]);
+    setScanned(0);
+    await scanBatch(list, 0, []);
+  };
+
+  const scanMore = async () => {
+    if (scanning || scanned >= scanList.length) return;
+    await scanBatch(scanList, scanned, results);
+  };
+
+  const analyzeWithAI = async (r: StratScan) => {
     setAiTarget(r);
     setAiText('');
     setAiBusy(true);
     const met = r.conditions.filter((c) => c.met).length;
     const context = [
+      `전략: ${mod.name}`,
       `종목: ${r.name} (${r.symbol})`,
       `현재가: ${r.price.toLocaleString('ko-KR')}원 (${r.changePct.toFixed(2)}%)`,
-      `밴드폭: ${r.bandwidth != null ? (r.bandwidth * 100).toFixed(2) + '%' : 'N/A'} · 최근 100봉 중 하위 ${r.bwPctRank ?? '-'}%`,
-      `수렴(Squeeze) 상태: ${r.isSqueezed ? '예' : '아니오'} · 하단밴드 이탈: ${r.belowLower ? '예' : '아니오'}`,
-      `BNF1 조건 충족: ${r.conditions.length}개 중 ${met}개 · 점수 ${r.score}/100 · 추천도 ${'★'.repeat(r.stars)}`,
+      ...mod.colHeaders.map((h, i) => `${h}: ${r.cols[i]?.value ?? '-'}`),
+      `매수 신호: ${r.buy ? '발생' : '없음'} · 매도(청산) 신호: ${r.exit ? '발생' : '없음'}`,
+      `조건 충족: ${r.conditions.length}개 중 ${met}개 · 점수 ${r.score}/100 · 추천도 ${'★'.repeat(r.stars)}`,
       '충족 상세: ' + r.conditions.map((c) => `${c.label}=${c.met ? 'O' : 'X'}`).join(', '),
     ].join('\n');
     try {
       const answer = await ollamaChat(ollamaConfig, [
-        { role: 'user', content: `다음 BNF 전략1 스캔 결과를 초보자도 이해할 수 있게 분석·설명하고 추천도(★1~5)와 근거를 제시해줘.\n\n${context}` },
+        { role: 'user', content: `다음 스캔 결과를 초보자도 이해할 수 있게 분석·설명하고 추천도(★1~5)와 근거를 제시해줘.\n\n${context}` },
       ]);
       setAiText(answer);
     } catch {
@@ -100,28 +122,30 @@ export default function ScannerPage() {
     setAiBusy(false);
   };
 
+  const colCount = 6 + mod.colHeaders.length + 2; // 관심,종목,현재가,등락 + cols + 매수,매도 + 점수,추천도,액션 조정
   return (
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">종목 스캐너</h1>
-          <p className="text-sm text-slate-400 mt-1">15분봉 기준 BNF 전략1 조건 충족도 검사 (100점 만점)</p>
+          <p className="text-sm text-slate-400 mt-1">{mod.short}</p>
         </div>
-        <div className="flex items-center gap-2">
-          <select className="input w-auto" value={universe} onChange={(e) => setUniverse(e.target.value as Universe)}>
-            <option value="KOSPI">KOSPI 주요종목</option>
-            <option value="KOSDAQ">KOSDAQ 주요종목</option>
-            <option value="WATCH">관심종목 ({watchlist.length})</option>
+        <div className="flex items-center gap-2 flex-wrap">
+          <StrategyPicker value={stratCode} onChange={setStratCode} />
+          <select className="input w-auto" value={universe} onChange={(e) => setUniverse(e.target.value)}>
+            {UNIVERSE_OPTIONS.map((u) => (
+              <option key={u.key} value={u.key}>{u.key === 'WATCH' ? `관심종목 (${watchlist.length})` : u.label}</option>
+            ))}
           </select>
-          <button className="btn-primary" onClick={runScan} disabled={scanning || !bnfEnabled}>
+          <button className="btn-primary" onClick={runScan} disabled={scanning || !enabled}>
             {scanning ? '스캔 중...' : '스캔 실행'}
           </button>
         </div>
       </header>
 
-      {!bnfEnabled && (
+      {!enabled && (
         <div className="card bg-red-500/10 border-red-500/40 text-red-300 text-sm">
-          BNF 전략1 사용 권한이 없습니다. 관리자에게 문의하세요.
+          해당 전략 사용 권한이 없습니다. 관리자에게 문의하세요.
         </div>
       )}
       {progress && <div className="text-sm text-accent animate-pulse">{progress}</div>}
@@ -134,10 +158,9 @@ export default function ScannerPage() {
               <th className="th">종목</th>
               <th className="th">현재가</th>
               <th className="th">등락</th>
-              <th className="th">밴드폭</th>
-              <th className="th">BW 백분위</th>
-              <th className="th">수렴</th>
-              <th className="th">하단이탈</th>
+              {mod.colHeaders.map((h) => <th key={h} className="th">{h}</th>)}
+              <th className="th">매수신호</th>
+              <th className="th">매도신호</th>
               <th className="th">점수</th>
               <th className="th">추천도</th>
               <th className="th">액션</th>
@@ -145,7 +168,7 @@ export default function ScannerPage() {
           </thead>
           <tbody>
             {results.length === 0 && !scanning && (
-              <tr><td colSpan={11} className="td text-center text-slate-500 py-10">[스캔 실행]을 눌러 종목 검사를 시작하세요.</td></tr>
+              <tr><td colSpan={colCount + 3} className="td text-center text-slate-500 py-10">[스캔 실행]을 눌러 종목 검사를 시작하세요.</td></tr>
             )}
             {results.map((r) => (
               <tr key={r.symbol} className="border-b border-edge/50 hover:bg-edge/30">
@@ -154,17 +177,18 @@ export default function ScannerPage() {
                     {watchlist.some((w) => w.symbol === r.symbol) ? '⭐' : '☆'}
                   </button>
                 </td>
-                <td className="td font-medium text-white">{r.name}</td>
+                <td className="td font-medium text-white">
+                  <Link to={`/chart?symbol=${r.symbol}&strat=${stratCode}`} className="hover:text-accent" title="차트 보기">{r.name}</Link>
+                </td>
                 <td className="td">{r.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}</td>
                 <td className={`td ${r.changePct >= 0 ? 'text-up' : 'text-down'}`}>{r.changePct.toFixed(2)}%</td>
-                <td className="td">{r.bandwidth != null ? (r.bandwidth * 100).toFixed(2) + '%' : '-'}</td>
-                <td className="td">{r.bwPctRank != null ? `하위 ${r.bwPctRank}%` : '-'}</td>
-                <td className="td">{r.isSqueezed ? <span className="badge bg-accent/20 text-accent">수렴</span> : '-'}</td>
-                <td className="td">{r.belowLower ? <span className="badge bg-up/20 text-up">매수신호</span> : '-'}</td>
+                {r.cols.map((c, i) => <td key={i} className={`td ${toneCls(c.tone)}`}>{c.value}</td>)}
+                <td className="td">{r.buy ? <span className="badge bg-up/20 text-up">매수</span> : <span className="text-slate-500">-</span>}</td>
+                <td className="td">{r.exit ? <span className="badge bg-amber-500/20 text-amber-400">매도</span> : <span className="text-slate-500">-</span>}</td>
                 <td className="td font-bold text-white">{r.score}</td>
                 <td className="td"><Stars n={r.stars} /></td>
                 <td className="td space-x-2">
-                  <Link to={`/chart?symbol=${r.symbol}`} className="text-accent hover:underline text-sm">차트</Link>
+                  <Link to={`/chart?symbol=${r.symbol}&strat=${stratCode}`} className="text-accent hover:underline text-sm">차트</Link>
                   <button className="text-purple-400 hover:underline text-sm" onClick={() => analyzeWithAI(r)}>AI분석</button>
                 </td>
               </tr>
@@ -173,7 +197,14 @@ export default function ScannerPage() {
         </table>
       </div>
 
-      {/* AI 분석 패널 */}
+      {scanList.length > 0 && scanned < scanList.length && (
+        <div className="text-center">
+          <button className="btn-ghost" onClick={scanMore} disabled={scanning}>
+            {scanning ? '스캔 중...' : `종목 더 보기 (+${Math.min(BATCH, scanList.length - scanned)}) · ${scanned}/${scanList.length}`}
+          </button>
+        </div>
+      )}
+
       {aiTarget && (
         <div className="card border-purple-500/40">
           <div className="flex items-center justify-between mb-2">

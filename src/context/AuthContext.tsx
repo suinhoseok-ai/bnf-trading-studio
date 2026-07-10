@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, useCallback, ReactNode 
 import type { Session } from '@supabase/supabase-js';
 import { supabase, supabaseConfigured } from '../lib/supabase';
 import type { Profile, Strategy } from '../lib/types';
+import { ALL_STRATEGIES } from '../lib/strategies';
 
 interface AuthState {
   session: Session | null;
@@ -27,23 +28,22 @@ const GUEST_PROFILE: Profile = {
   created_at: new Date().toISOString(),
 };
 
-const GUEST_STRATEGIES: Strategy[] = [
-  {
-    id: 1,
-    code: 'bnf1',
-    name: 'BNF 전략1 (볼린저밴드 수렴 회귀)',
-    description: '15분봉 볼린저밴드 수렴 후 하단밴드 이탈 매수, 중심선 50% 익절, 본절 이동, 상단밴드 전량 익절.',
-    enabled: true,
-    params: { period: 20, stddev: 2, bwLookback: 100, bwPercentile: 25, riskReward: 2, positionPct: 10 },
-  },
-];
+const GUEST_STRATEGIES: Strategy[] = ALL_STRATEGIES.map((m, i) => ({
+  id: i + 1,
+  code: m.code,
+  name: m.name,
+  description: m.short,
+  enabled: true,
+  params: m.params,
+}));
+const GUEST_CODES = ALL_STRATEGIES.map((m) => m.code);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const guestMode = !supabaseConfigured;
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(guestMode ? GUEST_PROFILE : null);
   const [strategies, setStrategies] = useState<Strategy[]>(guestMode ? GUEST_STRATEGIES : []);
-  const [allowed, setAllowed] = useState<string[]>(guestMode ? ['bnf1'] : []);
+  const [allowed, setAllowed] = useState<string[]>(guestMode ? GUEST_CODES : []);
   const [loading, setLoading] = useState(!guestMode);
 
   const loadProfile = useCallback(async (userId: string) => {

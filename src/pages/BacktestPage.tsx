@@ -1,18 +1,20 @@
 import { useEffect, useState } from 'react';
 import { fetchCandles, ALL_STOCKS, RANGE_BY_INTERVAL, Interval, stockName } from '../lib/marketData';
-import { calcIndicators } from '../lib/indicators';
-import { runBacktest } from '../lib/simulator';
+import { getStrategy, simulate, initStrategy } from '../lib/strategies';
 import type { BacktestResult } from '../lib/types';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import { ollamaChat, ruleBasedAnalysis } from '../lib/ollama';
 import { useOllamaConfig } from '../hooks/useOllamaConfig';
+import { useStrategySelection } from '../hooks/useStrategySelection';
+import StrategyPicker from '../components/StrategyPicker';
 import EquityChart from '../components/EquityChart';
 
 interface SavedResult {
   id: number;
   symbol: string;
   name: string;
+  strategy_code?: string;
   interval: string;
   range_label: string;
   metrics: Record<string, number>;
@@ -21,6 +23,7 @@ interface SavedResult {
 
 export default function BacktestPage() {
   const { profile, guestMode, allowedStrategyCodes } = useAuth();
+  const [stratCode, setStratCode] = useStrategySelection();
   const [symbol, setSymbol] = useState('005930.KS');
   const [interval, setInterval] = useState<Interval>('1d');
   const [range, setRange] = useState('2y');
@@ -33,7 +36,14 @@ export default function BacktestPage() {
   const [aiBusy, setAiBusy] = useState(false);
   const [ollamaConfig] = useOllamaConfig();
 
-  const bnfEnabled = allowedStrategyCodes.includes('bnf1');
+  const mod = getStrategy(stratCode);
+  const enabled = allowedStrategyCodes.includes(stratCode);
+
+  // 전략 변경 시 권장 봉/기간으로 자동 설정
+  useEffect(() => {
+    setInterval(mod.interval);
+    setRange(mod.range);
+  }, [stratCode, mod.interval, mod.range]);
 
   const loadSaved = async () => {
     if (guestMode || !profile) return;
@@ -48,15 +58,16 @@ export default function BacktestPage() {
   useEffect(() => { loadSaved(); }, []);
 
   const run = async () => {
-    if (!bnfEnabled) return;
+    if (!enabled) return;
     setRunning(true);
     setResult(null);
     setAiText('');
     try {
+      await initStrategy(mod); // 시장 지수 등 준비 (전략6)
       const { candles, demo: d } = await fetchCandles(symbol, interval, range);
       setDemo(d);
-      const rows = calcIndicators(candles);
-      const res = runBacktest(rows, { initialBalance });
+      const rows = mod.compute(candles);
+      const res = simulate(mod, rows, initialBalance);
       setResult(res);
 
       if (!guestMode && profile) {
@@ -64,7 +75,7 @@ export default function BacktestPage() {
           user_id: profile.id,
           symbol,
           name: stockName(symbol),
-          strategy_code: 'bnf1',
+          strategy_code: stratCode,
           interval,
           range_label: range,
           initial_balance: initialBalance,
@@ -82,8 +93,9 @@ export default function BacktestPage() {
     setAiBusy(true);
     const m = result.metrics;
     const context = [
+      `전략: ${mod.name}`,
       `백테스트 대상: ${stockName(symbol)} (${symbol}) · ${interval} 봉 · 기간 ${range}`,
-      `총수익률: ${m.totalReturn.toFixed(2)}% · 승률: ${m.winRate.toFixed(1)}% (목표 75%)`,
+      `총수익률: ${m.totalReturn.toFixed(2)}% · 승률: ${m.winRate.toFixed(1)}%`,
       `MDD: ${m.mdd.toFixed(2)}% · Profit Factor: ${m.profitFactor.toFixed(2)} (권장 1.5 이상)`,
       `Sharpe: ${m.sharpe.toFixed(2)} · CAGR: ${m.cagr.toFixed(2)}%`,
       `거래횟수: ${m.tradeCount}회 · 평균보유: ${m.avgHoldBars.toFixed(1)}봉`,
@@ -91,7 +103,7 @@ export default function BacktestPage() {
     ].join('\n');
     try {
       const answer = await ollamaChat(ollamaConfig, [
-        { role: 'user', content: `다음 BNF 전략1 백테스트 결과를 평가해줘. 승률이 목표(75%) 대비 어떤지, 왜 그런 결과가 나왔을지, 개선 방안은 무엇인지 분석해줘.\n\n${context}` },
+        { role: 'user', content: `다음 백테스트 결과를 평가해줘. 손익비/승률/MDD 관점에서 어떤지, 왜 그런 결과가 나왔을지, 개선 방안은 무엇인지 분석해줘.\n\n${context}` },
       ]);
       setAiText(answer);
     } catch {
@@ -106,7 +118,7 @@ export default function BacktestPage() {
   const metricCards = m
     ? [
         { label: '총수익률', value: `${m.totalReturn.toFixed(2)}%`, color: m.totalReturn >= 0 ? 'text-up' : 'text-down' },
-        { label: '승률 (목표 75%)', value: `${m.winRate.toFixed(1)}%`, color: m.winRate >= 75 ? 'text-profit' : 'text-amber-400' },
+        { label: '승률', value: `${m.winRate.toFixed(1)}%`, color: m.winRate >= 50 ? 'text-profit' : 'text-amber-400' },
         { label: 'MDD', value: `${m.mdd.toFixed(2)}%`, color: 'text-amber-400' },
         { label: 'Profit Factor', value: m.profitFactor >= 999 ? '∞' : m.profitFactor.toFixed(2), color: m.profitFactor >= 1.5 ? 'text-profit' : 'text-amber-400' },
         { label: 'Sharpe Ratio', value: m.sharpe.toFixed(2), color: 'text-white' },
@@ -120,11 +132,15 @@ export default function BacktestPage() {
     <div className="space-y-4">
       <header>
         <h1 className="text-2xl font-bold text-white">백테스트</h1>
-        <p className="text-sm text-slate-400 mt-1">BNF 전략1 과거 데이터 검증 — 가상 시뮬레이터 (진입 10% · 1:2 손익비 · 분할익절)</p>
+        <p className="text-sm text-slate-400 mt-1">{mod.short}</p>
       </header>
 
       {/* 실행 조건 */}
       <div className="card flex flex-wrap items-end gap-3">
+        <div>
+          <label className="text-xs text-slate-400 block mb-1">전략</label>
+          <StrategyPicker value={stratCode} onChange={setStratCode} />
+        </div>
         <div>
           <label className="text-xs text-slate-400 block mb-1">종목</label>
           <select className="input w-auto" value={symbol} onChange={(e) => setSymbol(e.target.value)}>
@@ -153,19 +169,18 @@ export default function BacktestPage() {
           <label className="text-xs text-slate-400 block mb-1">초기 자본금 (원)</label>
           <input className="input w-40" type="number" value={initialBalance} step={1_000_000} onChange={(e) => setInitialBalance(Number(e.target.value))} />
         </div>
-        <button className="btn-primary" onClick={run} disabled={running || !bnfEnabled}>
+        <button className="btn-primary" onClick={run} disabled={running || !enabled}>
           {running ? '시뮬레이션 중...' : '백테스트 실행'}
         </button>
         {demo && result && <span className="badge bg-amber-500/20 text-amber-400">데모 데이터 기반</span>}
       </div>
 
-      {!bnfEnabled && (
-        <div className="card bg-red-500/10 border-red-500/40 text-red-300 text-sm">BNF 전략1 사용 권한이 없습니다.</div>
+      {!enabled && (
+        <div className="card bg-red-500/10 border-red-500/40 text-red-300 text-sm">해당 전략 사용 권한이 없습니다.</div>
       )}
 
       {result && m && (
         <>
-          {/* 성과 지표 */}
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             {metricCards.map((c) => (
               <div key={c.label} className="card !p-3">
@@ -175,7 +190,6 @@ export default function BacktestPage() {
             ))}
           </div>
 
-          {/* 자산 곡선 */}
           <div className="card">
             <div className="flex items-center justify-between mb-2">
               <h3 className="font-bold text-white">자산 곡선 (Equity Curve)</h3>
@@ -186,7 +200,6 @@ export default function BacktestPage() {
             <EquityChart data={result.equityCurve} />
           </div>
 
-          {/* AI 분석 */}
           <div className="card border-purple-500/40">
             <div className="flex items-center justify-between mb-2">
               <h3 className="font-bold text-purple-300">🤖 Qwen3 백테스트 분석</h3>
@@ -197,7 +210,6 @@ export default function BacktestPage() {
             {aiText && <pre className="text-sm text-slate-200 whitespace-pre-wrap font-sans leading-relaxed">{aiText}</pre>}
           </div>
 
-          {/* 거래 로그 */}
           <div className="card">
             <h3 className="font-bold text-white mb-2">거래 로그 ({result.trades.length}건)</h3>
             <div className="max-h-72 overflow-y-auto text-sm space-y-1">
@@ -221,7 +233,7 @@ export default function BacktestPage() {
           <table className="w-full">
             <thead>
               <tr className="border-b border-edge">
-                <th className="th">일시</th><th className="th">종목</th><th className="th">주기</th><th className="th">기간</th>
+                <th className="th">일시</th><th className="th">전략</th><th className="th">종목</th><th className="th">주기</th><th className="th">기간</th>
                 <th className="th">총수익률</th><th className="th">승률</th><th className="th">MDD</th><th className="th">PF</th><th className="th">거래</th>
               </tr>
             </thead>
@@ -229,6 +241,7 @@ export default function BacktestPage() {
               {saved.map((s) => (
                 <tr key={s.id} className="border-b border-edge/50">
                   <td className="td text-slate-400">{new Date(s.created_at).toLocaleString('ko-KR')}</td>
+                  <td className="td text-slate-300">{getStrategy(s.strategy_code ?? 'bnf1').name.split('·')[0].trim()}</td>
                   <td className="td text-white">{s.name || s.symbol}</td>
                   <td className="td">{s.interval}</td>
                   <td className="td">{s.range_label}</td>

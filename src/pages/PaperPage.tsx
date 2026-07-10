@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
-import { fetchCandles, ALL_STOCKS, stockName } from '../lib/marketData';
-import { calcIndicators } from '../lib/indicators';
-import { processPosition } from '../lib/paper';
+import { fetchCandles, universeStocks, UNIVERSE_OPTIONS, stockName } from '../lib/marketData';
+import { getStrategy, manageOpen, initStrategy } from '../lib/strategies';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
+import { useStrategySelection } from '../hooks/useStrategySelection';
+import StrategyPicker from '../components/StrategyPicker';
 
 interface Account { cash: number; initial_balance: number }
 interface Position {
-  id: number; symbol: string; name: string; entry_price: number; shares: number;
+  id: number; symbol: string; name: string; strategy_code?: string; entry_price: number; shares: number;
   sl: number; tp1_hit: boolean; opened_at: string; status: string;
 }
 interface Trade {
@@ -16,9 +17,12 @@ interface Trade {
 }
 
 const INITIAL_BALANCE = 10_000_000;
+const shortRange = (interval: string) => (interval === '1d' ? '3mo' : '5d');
 
 export default function PaperPage() {
   const { profile, guestMode, allowedStrategyCodes } = useAuth();
+  const [stratCode, setStratCode] = useStrategySelection();
+  const [universe, setUniverse] = useState('KOSPI');
   const [account, setAccount] = useState<Account | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [trades, setTrades] = useState<Trade[]>([]);
@@ -26,10 +30,9 @@ export default function PaperPage() {
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string[]>([]);
 
-  const bnfEnabled = allowedStrategyCodes.includes('bnf1');
+  const enabled = allowedStrategyCodes.includes(stratCode);
   const uid = profile?.id ?? 'guest';
 
-  // ── 게스트 모드 localStorage 저장소 ──
   const guestLoad = () => {
     const g = JSON.parse(localStorage.getItem('paper') ?? 'null');
     return g ?? { account: null, positions: [], trades: [], nextId: 1 };
@@ -53,13 +56,14 @@ export default function PaperPage() {
   };
   useEffect(() => { load(); }, []);
 
-  // 보유 종목 현재가 갱신
+  // 보유 종목 현재가 갱신 (포지션 전략의 봉 주기 기준)
   useEffect(() => {
     (async () => {
       const map: Record<string, number> = {};
       for (const p of positions) {
+        const mod = getStrategy(p.strategy_code ?? 'bnf1');
         try {
-          const { candles } = await fetchCandles(p.symbol, '15m', '5d');
+          const { candles } = await fetchCandles(p.symbol, mod.interval, shortRange(mod.interval));
           map[p.symbol] = candles[candles.length - 1]?.close ?? p.entry_price;
         } catch { map[p.symbol] = p.entry_price; }
       }
@@ -92,37 +96,38 @@ export default function PaperPage() {
     await load();
   };
 
-  /** 자동매매 실행: 보유 포지션 청산 규칙 적용 + 관심/주요종목 신규 신호 매수 */
+  /** 자동매매: 보유 포지션 청산(각 포지션 전략 기준) + 선택 전략/유니버스 신규 매수 */
   const runAutoTrade = async () => {
-    if (!account || !bnfEnabled) return;
+    if (!account || !enabled) return;
     setBusy(true);
     const newLog: string[] = [];
     let cash = account.cash;
-
     const g = guestMode ? guestLoad() : null;
 
     try {
-      // ── 1. 보유 포지션 처리 ──
+      // ── 1. 보유 포지션 청산 처리 ──
       for (const pos of positions) {
-        const { candles } = await fetchCandles(pos.symbol, '15m', '60d');
-        const rows = calcIndicators(candles);
-        const { events, updated } = processPosition(
-          { symbol: pos.symbol, name: pos.name, entry_price: Number(pos.entry_price), shares: Number(pos.shares), sl: Number(pos.sl), tp1_hit: pos.tp1_hit, opened_at: pos.opened_at },
-          rows,
-        );
+        const mod = getStrategy(pos.strategy_code ?? 'bnf1');
+        await initStrategy(mod);
+        const { candles } = await fetchCandles(pos.symbol, mod.interval, mod.range);
+        const rows = mod.compute(candles);
+        const { events, updated } = manageOpen(mod, {
+          symbol: pos.symbol, name: pos.name, entry_price: Number(pos.entry_price), shares: Number(pos.shares),
+          sl: Number(pos.sl), tp1_hit: pos.tp1_hit, opened_at: pos.opened_at,
+        }, rows);
         for (const ev of events) {
           cash += ev.shares * ev.price;
           newLog.push(`[${ev.side}] ${pos.name} ${ev.note} · ${ev.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}원 · 손익 ${ev.pnl.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}원`);
           if (guestMode && g) {
             g.trades.push({ id: g.nextId++, symbol: pos.symbol, name: pos.name, side: ev.side, price: ev.price, shares: ev.shares, pnl: ev.pnl, note: ev.note, executed_at: new Date(ev.time * 1000).toISOString() });
           } else {
-            await supabase.from('bnf_paper_trades').insert({ user_id: uid, symbol: pos.symbol, name: pos.name, side: ev.side, price: ev.price, shares: ev.shares, pnl: ev.pnl, note: ev.note, executed_at: new Date(ev.time * 1000).toISOString() });
+            await supabase.from('bnf_paper_trades').insert({ user_id: uid, symbol: pos.symbol, name: pos.name, strategy_code: mod.code, side: ev.side, price: ev.price, shares: ev.shares, pnl: ev.pnl, note: ev.note, executed_at: new Date(ev.time * 1000).toISOString() });
           }
         }
         if (updated == null) {
           if (guestMode && g) {
             const gp = g.positions.find((p: Position) => p.id === pos.id);
-            if (gp) { gp.status = 'CLOSED'; }
+            if (gp) gp.status = 'CLOSED';
           } else {
             await supabase.from('bnf_paper_positions').update({ status: 'CLOSED', closed_at: new Date().toISOString() }).eq('id', pos.id);
           }
@@ -136,30 +141,30 @@ export default function PaperPage() {
         }
       }
 
-      // ── 2. 신규 매수 신호 스캔 (주요 종목 전체) ──
+      // ── 2. 신규 매수 신호 스캔 (선택 전략 · 선택 유니버스) ──
+      const mod = getStrategy(stratCode);
+      await initStrategy(mod);
       const held = new Set(positions.map((p) => p.symbol));
-      for (const s of ALL_STOCKS) {
+      for (const s of universeStocks(universe)) {
         if (held.has(s.symbol)) continue;
         try {
-          const { candles } = await fetchCandles(s.symbol, '15m', '60d');
-          const rows = calcIndicators(candles);
+          const { candles } = await fetchCandles(s.symbol, mod.interval, mod.range);
+          const rows = mod.compute(candles);
           const last = rows[rows.length - 1];
-          if (last?.buySignal && last.upperBand != null) {
-            const investAmount = cash * 0.1;
-            if (investAmount < 1000) continue;
-            const shares = investAmount / last.close;
-            const targetDist = last.upperBand - last.close;
-            const sl = last.close - targetDist / 2;
-            cash -= investAmount;
-            newLog.push(`[매수] ${s.name} · ${last.close.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}원 · 손절 ${sl.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}원 (현금 10% 진입)`);
-            const nowIso = new Date(last.time * 1000).toISOString();
-            if (guestMode && g) {
-              g.positions.push({ id: g.nextId++, symbol: s.symbol, name: s.name, entry_price: last.close, shares, sl, tp1_hit: false, opened_at: nowIso, status: 'OPEN' });
-              g.trades.push({ id: g.nextId++, symbol: s.symbol, name: s.name, side: 'BUY', price: last.close, shares, pnl: 0, note: 'BNF1 매수 신호', executed_at: nowIso });
-            } else {
-              await supabase.from('bnf_paper_positions').insert({ user_id: uid, symbol: s.symbol, name: s.name, entry_price: last.close, shares, sl, tp1_hit: false, opened_at: nowIso });
-              await supabase.from('bnf_paper_trades').insert({ user_id: uid, symbol: s.symbol, name: s.name, side: 'BUY', price: last.close, shares, pnl: 0, note: 'BNF1 매수 신호', executed_at: nowIso });
-            }
+          if (!last?.buy) continue;
+          const plan = mod.planEntry(rows, rows.length - 1, cash);
+          if (!plan || plan.shares <= 0) continue;
+          const invest = plan.shares * plan.entry_price;
+          if (invest < 1000) continue;
+          cash -= invest;
+          newLog.push(`[매수] ${s.name} · ${plan.entry_price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}원 · ${plan.note}`);
+          const nowIso = new Date(last.time * 1000).toISOString();
+          if (guestMode && g) {
+            g.positions.push({ id: g.nextId++, symbol: s.symbol, name: s.name, strategy_code: mod.code, entry_price: plan.entry_price, shares: plan.shares, sl: plan.sl, tp1_hit: false, opened_at: nowIso, status: 'OPEN' });
+            g.trades.push({ id: g.nextId++, symbol: s.symbol, name: s.name, side: 'BUY', price: plan.entry_price, shares: plan.shares, pnl: 0, note: `${mod.name.split('·')[0].trim()} 매수 신호`, executed_at: nowIso });
+          } else {
+            await supabase.from('bnf_paper_positions').insert({ user_id: uid, symbol: s.symbol, name: s.name, strategy_code: mod.code, entry_price: plan.entry_price, shares: plan.shares, sl: plan.sl, tp1_hit: false, opened_at: nowIso });
+            await supabase.from('bnf_paper_trades').insert({ user_id: uid, symbol: s.symbol, name: s.name, strategy_code: mod.code, side: 'BUY', price: plan.entry_price, shares: plan.shares, pnl: 0, note: `${mod.name.split('·')[0].trim()} 매수 신호`, executed_at: nowIso });
           }
         } catch { /* skip symbol */ }
       }
@@ -193,7 +198,7 @@ export default function PaperPage() {
       guestSave(g);
     } else {
       await supabase.from('bnf_paper_positions').update({ status: 'CLOSED', closed_at: new Date().toISOString() }).eq('id', pos.id);
-      await supabase.from('bnf_paper_trades').insert({ user_id: uid, symbol: pos.symbol, name: pos.name, side: 'SELL_MANUAL', price, shares: pos.shares, pnl, note: '수동 청산' });
+      await supabase.from('bnf_paper_trades').insert({ user_id: uid, symbol: pos.symbol, name: pos.name, strategy_code: pos.strategy_code ?? 'bnf1', side: 'SELL_MANUAL', price, shares: pos.shares, pnl, note: '수동 청산' });
       await supabase.from('bnf_paper_accounts').update({ cash: (account?.cash ?? 0) + proceeds, updated_at: new Date().toISOString() }).eq('user_id', uid);
     }
     await load();
@@ -208,7 +213,7 @@ export default function PaperPage() {
     BUY: { text: '매수', cls: 'bg-up/20 text-up' },
     SELL_TP1: { text: '1차익절', cls: 'bg-profit/20 text-profit' },
     SELL_TP2: { text: '전량익절', cls: 'bg-profit/20 text-profit' },
-    SELL_SL: { text: '손절', cls: 'bg-amber-500/20 text-amber-400' },
+    SELL_SL: { text: '손절/청산', cls: 'bg-amber-500/20 text-amber-400' },
     SELL_MANUAL: { text: '수동청산', cls: 'bg-edge text-slate-300' },
   };
 
@@ -218,8 +223,8 @@ export default function PaperPage() {
         <h1 className="text-2xl font-bold text-white">모의투자</h1>
         <div className="card text-center py-12">
           <div className="text-4xl mb-3">💰</div>
-          <p className="text-slate-300 mb-1">가상 계좌를 개설하고 BNF 전략1 모의투자를 시작하세요.</p>
-          <p className="text-sm text-slate-500 mb-5">초기 자본금 1,000만원 · 신호당 가용현금 10% 진입 · 1:2 손익비</p>
+          <p className="text-slate-300 mb-1">가상 계좌를 개설하고 전략 자동매매 모의투자를 시작하세요.</p>
+          <p className="text-sm text-slate-500 mb-5">초기 자본금 1,000만원 · 전략별 진입 비중 · 신호 기반 자동 청산</p>
           <button className="btn-primary" onClick={openAccount}>가상 계좌 개설 (1,000만원)</button>
         </div>
       </div>
@@ -231,37 +236,29 @@ export default function PaperPage() {
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">모의투자</h1>
-          <p className="text-sm text-slate-400 mt-1">BNF 전략1 자동매매 시뮬레이션 (15분봉 신호 기반)</p>
+          <p className="text-sm text-slate-400 mt-1">전략 자동매매 시뮬레이션 · 보유 포지션은 각 포지션 전략 기준으로 청산</p>
         </div>
-        <div className="flex gap-2">
-          <button className="btn-primary" onClick={runAutoTrade} disabled={busy || !bnfEnabled}>
+        <div className="flex gap-2 flex-wrap items-center">
+          <StrategyPicker value={stratCode} onChange={setStratCode} />
+          <select className="input w-auto" value={universe} onChange={(e) => setUniverse(e.target.value)}>
+            {UNIVERSE_OPTIONS.filter((u) => u.key !== 'WATCH').map((u) => (
+              <option key={u.key} value={u.key}>{u.label}</option>
+            ))}
+          </select>
+          <button className="btn-primary" onClick={runAutoTrade} disabled={busy || !enabled}>
             {busy ? '자동매매 실행 중...' : '⚡ 자동매매 스캔 실행'}
           </button>
           <button className="btn-danger" onClick={resetAccount}>계좌 초기화</button>
         </div>
       </header>
 
-      {/* 계좌 요약 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">총 평가자산</div>
-          <div className="text-lg font-bold text-white">{fmt(totalEquity)}원</div>
-        </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">가용 현금</div>
-          <div className="text-lg font-bold text-white">{fmt(account.cash)}원</div>
-        </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">보유 평가액</div>
-          <div className="text-lg font-bold text-white">{fmt(positionValue)}원</div>
-        </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">총 수익률</div>
-          <div className={`text-lg font-bold ${totalReturn >= 0 ? 'text-up' : 'text-down'}`}>{totalReturn.toFixed(2)}%</div>
-        </div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">총 평가자산</div><div className="text-lg font-bold text-white">{fmt(totalEquity)}원</div></div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">가용 현금</div><div className="text-lg font-bold text-white">{fmt(account.cash)}원</div></div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">보유 평가액</div><div className="text-lg font-bold text-white">{fmt(positionValue)}원</div></div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">총 수익률</div><div className={`text-lg font-bold ${totalReturn >= 0 ? 'text-up' : 'text-down'}`}>{totalReturn.toFixed(2)}%</div></div>
       </div>
 
-      {/* 실행 로그 */}
       {log.length > 0 && (
         <div className="card">
           <h3 className="font-bold text-white mb-2">자동매매 실행 결과</h3>
@@ -273,24 +270,24 @@ export default function PaperPage() {
         </div>
       )}
 
-      {/* 보유 포지션 */}
       <div className="card overflow-x-auto">
         <h3 className="font-bold text-white mb-2">보유 포지션 ({positions.length})</h3>
         <table className="w-full">
           <thead>
             <tr className="border-b border-edge">
-              <th className="th">종목</th><th className="th">진입가</th><th className="th">현재가</th><th className="th">수량</th>
+              <th className="th">종목</th><th className="th">전략</th><th className="th">진입가</th><th className="th">현재가</th><th className="th">수량</th>
               <th className="th">손절가</th><th className="th">1차익절</th><th className="th">평가손익</th><th className="th">액션</th>
             </tr>
           </thead>
           <tbody>
-            {positions.length === 0 && <tr><td colSpan={8} className="td text-center text-slate-500 py-8">보유 포지션이 없습니다. [자동매매 스캔 실행]으로 신호를 탐색하세요.</td></tr>}
+            {positions.length === 0 && <tr><td colSpan={9} className="td text-center text-slate-500 py-8">보유 포지션이 없습니다. [자동매매 스캔 실행]으로 신호를 탐색하세요.</td></tr>}
             {positions.map((p) => {
               const cur = prices[p.symbol] ?? Number(p.entry_price);
               const pnl = Number(p.shares) * (cur - Number(p.entry_price));
               return (
                 <tr key={p.id} className="border-b border-edge/50">
                   <td className="td font-medium text-white">{p.name || stockName(p.symbol)}</td>
+                  <td className="td text-slate-400 text-xs">{getStrategy(p.strategy_code ?? 'bnf1').name.split('·')[0].trim()}</td>
                   <td className="td">{fmt(Number(p.entry_price))}</td>
                   <td className="td">{fmt(cur)}</td>
                   <td className="td">{Number(p.shares).toFixed(2)}주</td>
@@ -305,7 +302,6 @@ export default function PaperPage() {
         </table>
       </div>
 
-      {/* 거래 내역 */}
       <div className="card overflow-x-auto">
         <h3 className="font-bold text-white mb-2">거래 내역 (최근 50건)</h3>
         <table className="w-full">

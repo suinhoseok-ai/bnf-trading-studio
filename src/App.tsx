@@ -5,6 +5,9 @@ import LoginPage from './pages/LoginPage';
 import PendingPage from './pages/PendingPage';
 import DashboardPage from './pages/DashboardPage';
 import ScannerPage from './pages/ScannerPage';
+import StocksPage from './pages/StocksPage';
+import ReportPage from './pages/ReportPage';
+import PositionsPage from './pages/PositionsPage';
 import ChartPage from './pages/ChartPage';
 import BacktestPage from './pages/BacktestPage';
 import PaperPage from './pages/PaperPage';
@@ -49,6 +52,9 @@ export default function App() {
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/scanner" element={<ScannerPage />} />
+        <Route path="/stocks" element={<StocksPage />} />
+        <Route path="/report" element={<ReportPage />} />
+        <Route path="/positions" element={<PositionsPage />} />
         <Route path="/chart" element={<ChartPage />} />
         <Route path="/backtest" element={<BacktestPage />} />
         <Route path="/paper" element={<PaperPage />} />

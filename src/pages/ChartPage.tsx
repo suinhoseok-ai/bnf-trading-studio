@@ -1,44 +1,55 @@
 import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { fetchCandles, ALL_STOCKS, RANGE_BY_INTERVAL, Interval, stockName } from '../lib/marketData';
-import { calcIndicators, bwPercentRank } from '../lib/indicators';
-import { runBacktest } from '../lib/simulator';
-import type { IndicatorRow, TradeEvent } from '../lib/types';
+import { getStrategy, simulate, initStrategy } from '../lib/strategies';
+import type { StratRow } from '../lib/strategies/types';
+import type { TradeEvent } from '../lib/types';
+import { analyzeChart } from '../lib/analysis';
+import { useStrategySelection } from '../hooks/useStrategySelection';
+import StrategyPicker from '../components/StrategyPicker';
 import CandleChart from '../components/CandleChart';
 
 export default function ChartPage() {
   const [params, setParams] = useSearchParams();
+  const [stratCode, setStratCode] = useStrategySelection(params.get('strat') ?? 'bnf1');
   const [symbol, setSymbol] = useState(params.get('symbol') ?? '005930.KS');
   const [interval, setInterval] = useState<Interval>('15m');
   const [range, setRange] = useState('60d');
-  const [rows, setRows] = useState<IndicatorRow[]>([]);
+  const [rows, setRows] = useState<StratRow[]>([]);
   const [trades, setTrades] = useState<TradeEvent[]>([]);
   const [loading, setLoading] = useState(false);
   const [demo, setDemo] = useState(false);
 
+  const mod = getStrategy(stratCode);
+
+  // 전략 변경 시 권장 봉/기간 적용
+  useEffect(() => {
+    setInterval(mod.interval);
+    setRange(mod.range);
+  }, [stratCode, mod.interval, mod.range]);
+
   const load = async () => {
     setLoading(true);
     try {
+      await initStrategy(mod); // 시장 지수 등 외부 데이터 준비 (전략6)
       const { candles, demo: d } = await fetchCandles(symbol, interval, range);
       setDemo(d);
-      const ind = calcIndicators(candles);
+      const ind = mod.compute(candles);
       setRows(ind);
-      // 화면 구간에 대한 시뮬레이션으로 매매 마커 생성
-      const result = runBacktest(ind);
-      setTrades(result.trades);
+      setTrades(simulate(mod, ind, 10_000_000).trades);
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { load(); }, [symbol, interval, range]);
+  useEffect(() => { load(); }, [symbol, interval, range, stratCode]);
   useEffect(() => {
     const s = params.get('symbol');
     if (s && s !== symbol) setSymbol(s);
   }, [params]);
 
   const last = rows[rows.length - 1];
-  const rank = bwPercentRank(rows);
+  const analysis = !loading && rows.length > 1 ? analyzeChart(mod, symbol, stockName(symbol), rows) : null;
   const fmt = (n: number | null | undefined) =>
     n == null ? '-' : n.toLocaleString('ko-KR', { maximumFractionDigits: 0 });
 
@@ -47,10 +58,11 @@ export default function ChartPage() {
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-2xl font-bold text-white">차트 분석 — {stockName(symbol)}</h1>
-          <p className="text-sm text-slate-400 mt-1">볼린저밴드(20, 2σ) + BNF1 매매 시그널 마커</p>
+          <p className="text-sm text-slate-400 mt-1">{mod.name}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
-          <select className="input w-auto" value={symbol} onChange={(e) => { setSymbol(e.target.value); setParams({ symbol: e.target.value }); }}>
+          <StrategyPicker value={stratCode} onChange={(c) => { setStratCode(c); setParams({ symbol, strat: c }); }} />
+          <select className="input w-auto" value={symbol} onChange={(e) => { setSymbol(e.target.value); setParams({ symbol: e.target.value, strat: stratCode }); }}>
             {ALL_STOCKS.map((s) => (
               <option key={s.symbol} value={s.symbol}>{s.name} ({s.market})</option>
             ))}
@@ -78,28 +90,17 @@ export default function ChartPage() {
           <div className="text-xs text-slate-400">종가</div>
           <div className="font-bold text-white">{fmt(last?.close)}</div>
         </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">MA20 (중심선)</div>
-          <div className="font-bold text-amber-400">{fmt(last?.ma20)}</div>
-        </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">상단밴드</div>
-          <div className="font-bold text-profit">{fmt(last?.upperBand)}</div>
-        </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">하단밴드</div>
-          <div className="font-bold text-profit">{fmt(last?.lowerBand)}</div>
-        </div>
-        <div className="card !p-3">
-          <div className="text-xs text-slate-400">밴드폭 (BW)</div>
-          <div className="font-bold text-white">{last?.bandwidth != null ? (last.bandwidth * 100).toFixed(2) + '%' : '-'}</div>
-          <div className="text-xs text-slate-500">{rank != null ? `100봉 중 하위 ${rank}%` : ''}</div>
-        </div>
+        {mod.lineStyles.slice(0, 4).map((ls) => (
+          <div key={ls.key} className="card !p-3">
+            <div className="text-xs text-slate-400">{ls.label}</div>
+            <div className="font-bold" style={{ color: ls.color }}>{fmt(last?.lines[ls.key])}</div>
+          </div>
+        ))}
         <div className="card !p-3">
           <div className="text-xs text-slate-400">상태</div>
           <div className="font-bold">
-            {last?.buySignal ? <span className="text-up">🔥 매수신호</span>
-              : last?.isSqueezed ? <span className="text-accent">수렴 중</span>
+            {last?.buy ? <span className="text-up">🔥 매수신호</span>
+              : last?.exit ? <span className="text-amber-400">📉 매도신호</span>
               : <span className="text-slate-400">중립</span>}
           </div>
         </div>
@@ -109,14 +110,57 @@ export default function ChartPage() {
         {loading ? (
           <div className="h-[460px] flex items-center justify-center text-slate-400 animate-pulse">차트 데이터 로딩 중...</div>
         ) : (
-          <CandleChart rows={rows} trades={trades} height={460} />
+          <CandleChart rows={rows} lineStyles={mod.lineStyles} trades={trades} height={460} />
         )}
-        <div className="flex gap-4 mt-3 text-xs text-slate-400">
-          <span><span className="text-amber-400">━</span> MA20 중심선</span>
-          <span><span className="text-profit">━</span> 상/하단 밴드 (±2σ)</span>
-          <span>▲ 매수 · ● 1차 익절 50% · ▼ 2차 익절/손절</span>
+        <div className="flex gap-4 mt-3 text-xs text-slate-400 flex-wrap">
+          {mod.lineStyles.map((ls) => (
+            <span key={ls.key}><span style={{ color: ls.color }}>━</span> {ls.label}</span>
+          ))}
+          <span>▲ 매수 · ● 1차 익절 · ▼ 익절/손절 청산</span>
         </div>
       </div>
+
+      {/* 전략 엔진 분석 (규칙 기반 · AI 미사용) */}
+      {analysis && (
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <h3 className="font-bold text-white">📐 전략 엔진 분석 — {mod.name}</h3>
+            <span className={`badge ${
+              analysis.status === 'BUY' ? 'bg-up/20 text-up'
+              : analysis.status === 'SELL' ? 'bg-amber-500/20 text-amber-400'
+              : 'bg-edge text-slate-300'
+            }`}>{analysis.statusLabel}</span>
+          </div>
+          <div className="text-sm font-semibold text-accent">{analysis.headline}</div>
+          <div className="space-y-2 text-sm text-slate-300 leading-relaxed">
+            {analysis.paragraphs.map((p, i) => <p key={i}>{p}</p>)}
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full max-w-xl">
+              <thead>
+                <tr className="border-b border-edge">
+                  <th className="th">진입 조건</th><th className="th">충족</th><th className="th">배점</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analysis.scan.conditions.map((c) => (
+                  <tr key={c.label} className="border-b border-edge/50">
+                    <td className="td text-slate-300">{c.label}</td>
+                    <td className="td">{c.met ? <span className="text-profit">✓ 충족</span> : <span className="text-slate-500">✗ 미충족</span>}</td>
+                    <td className="td text-slate-400">{c.pts}점</td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className="td font-bold text-white">합계</td>
+                  <td className="td" />
+                  <td className="td font-bold text-white">{analysis.scan.score}점</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-xs text-slate-500">※ 본 분석은 AI가 아닌 전략 엔진의 수식 계산 결과를 그대로 서술한 것입니다.</p>
+        </div>
+      )}
     </div>
   );
 }

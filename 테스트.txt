@@ -1,3 +1,14 @@
+PC재기동후 ai 기동 파워셀
+$env:OLLAMA_ORIGINS="*"
+ollama serve
+
+
+
+
+
+
+
+
 cd C:\02.클로드\01.테스트\98.BNF
 npm run dev
 

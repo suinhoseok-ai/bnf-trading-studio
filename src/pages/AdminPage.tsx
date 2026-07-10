@@ -1,9 +1,27 @@
 import { useEffect, useState } from 'react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
-import type { Profile, Strategy } from '../lib/types';
+import type { Profile, Strategy, AdminConfig } from '../lib/types';
+import StrategyPicker from '../components/StrategyPicker';
 
-type Tab = 'users' | 'strategies' | 'access';
+type Tab = 'users' | 'strategies' | 'access' | 'report';
+
+const DEFAULT_REPORT: AdminConfig = {
+  reportEnabled: false,
+  reportDays: [1, 2, 3, 4, 5],
+  reportHour: 17,
+  reportStrategy: 'bnf1',
+  reportMarket: 'ALL',
+  reportMaxStocks: 60,
+  reportSortBy: 'score',
+  reportTopN: 20,
+  reportRecipient: '',
+  fullReportEnabled: false,
+  fullReportDays: [1, 2, 3, 4, 5],
+  fullReportHour: 17,
+  fullReportRecipient: '',
+};
+const DAY_LABELS: [number, string][] = [[1, '월'], [2, '화'], [3, '수'], [4, '목'], [5, '금'], [6, '토'], [0, '일']];
 
 export default function AdminPage() {
   const { profile: me, guestMode, refreshProfile } = useAuth();
@@ -13,6 +31,9 @@ export default function AdminPage() {
   const [accessUser, setAccessUser] = useState<string>('');
   const [accessMap, setAccessMap] = useState<Map<number, boolean>>(new Map());
   const [msg, setMsg] = useState('');
+  const [report, setReport] = useState<AdminConfig>(DEFAULT_REPORT);
+  const [savingReport, setSavingReport] = useState(false);
+  const setRep = <K extends keyof AdminConfig>(k: K, v: AdminConfig[K]) => setReport((prev) => ({ ...prev, [k]: v }));
 
   const load = async () => {
     if (guestMode) return;
@@ -20,8 +41,25 @@ export default function AdminPage() {
     setUsers((u as unknown as Profile[]) ?? []);
     const { data: s } = await supabase.from('bnf_strategies').select('*').order('id');
     setStrategies((s as unknown as Strategy[]) ?? []);
+    const { data: cfg } = await supabase.from('bnf_admin_config').select('config').eq('id', 1).maybeSingle();
+    if (cfg?.config) setReport({ ...DEFAULT_REPORT, ...(cfg.config as AdminConfig) });
   };
   useEffect(() => { load(); }, []);
+
+  const saveReport = async () => {
+    setSavingReport(true);
+    await supabase.from('bnf_admin_config').update({ config: report, updated_at: new Date().toISOString() }).eq('id', 1);
+    setSavingReport(false);
+    flash('리포트 설정 저장 완료');
+  };
+  const toggleDay = (d: number) => {
+    const cur = report.reportDays ?? [];
+    setRep('reportDays', cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d].sort());
+  };
+  const toggleFullDay = (d: number) => {
+    const cur = report.fullReportDays ?? [];
+    setRep('fullReportDays', cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d].sort());
+  };
 
   const flash = (m: string) => { setMsg(m); setTimeout(() => setMsg(''), 2500); };
 
@@ -95,7 +133,7 @@ export default function AdminPage() {
       </header>
 
       <div className="flex gap-2">
-        {([['users', '회원 관리'], ['strategies', '전략 관리'], ['access', '사용자별 전략 권한']] as [Tab, string][]).map(([t, label]) => (
+        {([['users', '회원 관리'], ['strategies', '전략 관리'], ['access', '사용자별 전략 권한'], ['report', '스캔 리포트']] as [Tab, string][]).map(([t, label]) => (
           <button key={t} className={tab === t ? 'btn-primary' : 'btn-ghost'} onClick={() => setTab(t)}>
             {label}
           </button>
@@ -227,6 +265,113 @@ export default function AdminPage() {
               </tbody>
             </table>
           )}
+        </div>
+      )}
+
+      {/* ── 스캔 리포트 (이메일) ── */}
+      {tab === 'report' && (
+        <div className="card space-y-4 max-w-2xl">
+          <div className="flex items-center justify-between">
+            <h3 className="font-bold text-white">일일 이메일 스캔 리포트</h3>
+            <label className="flex items-center gap-2 text-sm text-slate-300">
+              <input type="checkbox" checked={!!report.reportEnabled} onChange={(e) => setRep('reportEnabled', e.target.checked)} />
+              리포트 켜기
+            </label>
+          </div>
+          <p className="text-xs text-slate-500 leading-relaxed">
+            설정한 요일·시각(KST)에 전체(또는 시장별) 종목을 선택 전략으로 스캔하여 상위 종목을 이메일로 발송합니다.
+            발송에는 Netlify 환경변수 <code className="bg-base px-1 rounded">RESEND_API_KEY</code>(Resend), <code className="bg-base px-1 rounded">SUPABASE_SERVICE_ROLE_KEY</code>가 필요합니다.
+          </p>
+
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">발송 요일</label>
+            <div className="flex gap-2 flex-wrap">
+              {DAY_LABELS.map(([d, l]) => (
+                <button key={d} onClick={() => toggleDay(d)}
+                  className={`px-3 py-1 rounded-md text-sm ${(report.reportDays ?? []).includes(d) ? 'bg-accent text-white' : 'bg-base text-slate-400 border border-edge'}`}>
+                  {l}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid md:grid-cols-3 gap-3">
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">발송 시각 (0~23시, KST)</label>
+              <input className="input" type="number" min={0} max={23} value={report.reportHour ?? 17} onChange={(e) => setRep('reportHour', Math.min(23, Math.max(0, Number(e.target.value))))} />
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">스캔 전략</label>
+              <StrategyPicker value={report.reportStrategy ?? 'bnf1'} onChange={(c) => setRep('reportStrategy', c)} className="input w-full" />
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">대상 시장</label>
+              <select className="input w-full" value={report.reportMarket ?? 'ALL'} onChange={(e) => setRep('reportMarket', e.target.value as AdminConfig['reportMarket'])}>
+                <option value="KOSPI">코스피</option>
+                <option value="KOSDAQ">코스닥</option>
+                <option value="ALL">전체</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">최대 스캔 종목 수</label>
+              <input className="input" type="number" min={5} max={200} value={report.reportMaxStocks ?? 60} onChange={(e) => setRep('reportMaxStocks', Math.max(5, Number(e.target.value)))} />
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">정렬 기준</label>
+              <select className="input w-full" value={report.reportSortBy ?? 'score'} onChange={(e) => setRep('reportSortBy', e.target.value as AdminConfig['reportSortBy'])}>
+                <option value="score">조건 점수 높은순</option>
+                <option value="changePct">등락률 높은순</option>
+              </select>
+            </div>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">상위 N개 발송</label>
+              <input className="input" type="number" min={1} max={100} value={report.reportTopN ?? 20} onChange={(e) => setRep('reportTopN', Math.max(1, Number(e.target.value)))} />
+            </div>
+          </div>
+
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">수신 이메일</label>
+            <input className="input" type="email" value={report.reportRecipient ?? ''} onChange={(e) => setRep('reportRecipient', e.target.value)} placeholder="you@example.com" />
+          </div>
+
+          {/* ── 전체 리포트 메일 (전 전략 × 주요 종목) ── */}
+          <div className="border-t border-edge pt-4 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-bold text-white">전체 리포트 메일 (전 전략 × 코스피15 + 코스닥8)</h3>
+              <label className="flex items-center gap-2 text-sm text-slate-300">
+                <input type="checkbox" checked={!!report.fullReportEnabled} onChange={(e) => setRep('fullReportEnabled', e.target.checked)} />
+                켜기
+              </label>
+            </div>
+            <p className="text-xs text-slate-500 leading-relaxed">
+              [전체 리포트] 페이지와 동일한 내용(모든 전략별 단락 + 시세·지표·매수/매도신호·점수·추천도)을 지정한 요일·시각에 이메일로 발송합니다.
+            </p>
+            <div>
+              <label className="text-xs text-slate-400 block mb-1">발송 요일</label>
+              <div className="flex gap-2 flex-wrap">
+                {DAY_LABELS.map(([d, l]) => (
+                  <button key={d} onClick={() => toggleFullDay(d)}
+                    className={`px-3 py-1 rounded-md text-sm ${(report.fullReportDays ?? []).includes(d) ? 'bg-accent text-white' : 'bg-base text-slate-400 border border-edge'}`}>
+                    {l}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="grid md:grid-cols-2 gap-3">
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">발송 시각 (0~23시, KST)</label>
+                <input className="input" type="number" min={0} max={23} value={report.fullReportHour ?? 17} onChange={(e) => setRep('fullReportHour', Math.min(23, Math.max(0, Number(e.target.value))))} />
+              </div>
+              <div>
+                <label className="text-xs text-slate-400 block mb-1">수신 이메일</label>
+                <input className="input" type="email" value={report.fullReportRecipient ?? ''} onChange={(e) => setRep('fullReportRecipient', e.target.value)} placeholder="you@example.com" />
+              </div>
+            </div>
+          </div>
+
+          <button className="btn-primary" onClick={saveReport} disabled={savingReport}>
+            {savingReport ? '저장 중...' : '리포트 설정 저장'}
+          </button>
         </div>
       )}
     </div>

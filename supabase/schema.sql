@@ -69,10 +69,30 @@ create table if not exists public.bnf_strategies (
 );
 
 insert into public.bnf_strategies (code, name, description, enabled, params) values
-  ('bnf1', 'BNF 전략1 (볼린저밴드 수렴 회귀)',
+  ('bnf1', 'BNF 전략1 · 볼린저밴드 수렴 회귀',
    '15분봉 기준 볼린저밴드(20, 2σ) 밴드폭 수렴 구간에서 하단밴드 하향 이탈 시 매수. 중심선 도달 시 50% 익절 후 손절가 본절 이동, 상단밴드 도달 시 전량 익절. 1:2 손익비 초기 손절.',
    true,
-   '{"period":20,"stddev":2,"bwLookback":100,"bwPercentile":25,"riskReward":2,"positionPct":10}'::jsonb)
+   '{"period":20,"stddev":2,"bwLookback":100,"bwPercentile":25,"riskReward":2,"positionPct":10}'::jsonb),
+  ('breakout', '전략2 · 추세 돌파 + 거래량 급증',
+   '일봉 기준 60일 최고가를 거래량 2.5배 급증과 함께 상향 돌파 시 매수. 돌파캔들 저가 손절, EMA20 하향 이탈 시 추세 청산.',
+   true,
+   '{"resPeriod":60,"volMaPeriod":20,"volMult":2.5,"emaPeriod":20,"positionPct":20}'::jsonb),
+  ('pullback', '전략3 · EMA 눌림목 모멘텀',
+   '일봉 정배열(EMA20>EMA60) 추세에서 EMA20 눌림목 + 스토캐스틱 골든크로스 매수. EMA20 -3% 손절, 과매수/시간(7영업일) 청산.',
+   true,
+   '{"emaShort":20,"emaLong":60,"stochK":14,"stochSmooth":3,"maxDays":7,"positionPct":20}'::jsonb),
+  ('alignment', '전략4 · 이동평균선 정배열',
+   '일봉 5>20>60>120 완전 정배열 전환 초입 매수(이격도 108 이하). 120일선 -2% 손절, 20일선 이탈 50% 익절, 데드크로스/60일선 이탈 전량 청산.',
+   true,
+   '{"ma1":5,"ma2":20,"ma3":60,"ma4":120,"disparityLimit":108,"positionPct":30}'::jsonb),
+  ('box', '전략5 · 박스권 돌파',
+   '일봉 기준 높이 15% 이내 조밀 박스권 상단을 거래량 1.5배와 함께 돌파 시 매수. 박스 중간값 손절, EMA20 이탈 청산.',
+   true,
+   '{"boxPeriod":20,"maxHeight":15,"volMult":1.5,"emaPeriod":20,"positionPct":25}'::jsonb),
+  ('rebound', '전략6 · 과매도 반등 + 시장 필터',
+   '하락장(KOSPI<200일선) 전용 역추세: 종가가 5일선 아래 + RSI(2) 10 이하 극단 과매도 시 매수. 5일선 회복 익절, 최대 5영업일 시간 청산.',
+   true,
+   '{"rsiPeriod":2,"rsiThresh":10,"smaPeriod":5,"indexSma":200,"maxDays":5,"positionPct":20}'::jsonb)
 on conflict (code) do nothing;
 
 -- ------------------------------------------------------------
@@ -153,6 +173,34 @@ create table if not exists public.bnf_backtest_results (
   created_at timestamptz not null default now()
 );
 
+-- ------------------------------------------------------------
+-- 6.5 수동 등록 포지션 (실보유 · 매도 시그널 텔레그램 알림용)
+-- ------------------------------------------------------------
+create table if not exists public.bnf_user_positions (
+  id bigserial primary key,
+  user_id uuid not null references public.bnf_profiles(id) on delete cascade,
+  symbol text not null,
+  name text default '',
+  strategy_code text not null default 'bnf1',
+  entry_price numeric not null,
+  shares numeric not null,
+  alert_enabled boolean not null default true,
+  status text not null default 'OPEN' check (status in ('OPEN', 'CLOSED')),
+  opened_at timestamptz not null default now(),
+  closed_at timestamptz
+);
+
+-- ------------------------------------------------------------
+-- 7. 관리자 전역 설정 (일일 이메일 스캔 리포트 등) — 단일 행
+-- ------------------------------------------------------------
+create table if not exists public.bnf_admin_config (
+  id int primary key default 1,
+  config jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now(),
+  constraint bnf_admin_config_singleton check (id = 1)
+);
+insert into public.bnf_admin_config (id, config) values (1, '{}'::jsonb) on conflict (id) do nothing;
+
 -- ============================================================
 -- RLS (Row Level Security) — 사용자별 데이터 격리 + 관리자 전체 접근
 -- ============================================================
@@ -164,6 +212,8 @@ alter table public.bnf_paper_accounts enable row level security;
 alter table public.bnf_paper_positions enable row level security;
 alter table public.bnf_paper_trades enable row level security;
 alter table public.bnf_backtest_results enable row level security;
+alter table public.bnf_user_positions enable row level security;
+alter table public.bnf_admin_config enable row level security;
 
 -- bnf_profiles: 본인 조회/수정(settings), 관리자 전체 조회/수정
 drop policy if exists "profiles_select_own" on public.bnf_profiles;
@@ -209,3 +259,15 @@ create policy "paper_trades_own" on public.bnf_paper_trades
 drop policy if exists "backtest_results_own" on public.bnf_backtest_results;
 create policy "backtest_results_own" on public.bnf_backtest_results
   for all using (user_id = auth.uid() or public.is_admin());
+
+drop policy if exists "user_positions_own" on public.bnf_user_positions;
+create policy "user_positions_own" on public.bnf_user_positions
+  for all using (user_id = auth.uid() or public.is_admin());
+
+-- bnf_admin_config: 로그인 사용자 조회, 관리자만 변경
+drop policy if exists "admin_config_select" on public.bnf_admin_config;
+create policy "admin_config_select" on public.bnf_admin_config
+  for select using (auth.uid() is not null);
+drop policy if exists "admin_config_admin" on public.bnf_admin_config;
+create policy "admin_config_admin" on public.bnf_admin_config
+  for all using (public.is_admin());

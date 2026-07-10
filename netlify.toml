@@ -12,6 +12,12 @@
   to = "/.netlify/functions/yahoo/:splat"
   status = 200
 
+# 텔레그램 발송 프록시 (프로덕션)
+[[redirects]]
+  from = "/api/telegram"
+  to = "/.netlify/functions/telegram"
+  status = 200
+
 # SPA 라우팅 fallback
 [[redirects]]
   from = "/*"

@@ -5,9 +5,12 @@ import { useAuth } from '../context/AuthContext';
 const NAV = [
   { to: '/', label: '대시보드', icon: '📊' },
   { to: '/scanner', label: '종목 스캐너', icon: '🔍' },
+  { to: '/stocks', label: '전체 종목', icon: '📋' },
+  { to: '/report', label: '전체 리포트', icon: '📑' },
   { to: '/chart', label: '차트 분석', icon: '📈' },
   { to: '/backtest', label: '백테스트', icon: '⏱️' },
   { to: '/paper', label: '모의투자', icon: '💰' },
+  { to: '/positions', label: '내 포지션', icon: '💼' },
   { to: '/ai', label: 'AI 분석 (Qwen3)', icon: '🤖' },
   { to: '/settings', label: '설정', icon: '⚙️' },
 ];
