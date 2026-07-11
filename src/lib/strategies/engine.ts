@@ -63,6 +63,24 @@ export function meanOfPrev(vals: number[], period: number, idx: number): number 
   return sum / period;
 }
 
+/** RSI (rolling 평균 방식 — 명세서 스켈레톤과 동일) */
+export function rsiSimple(closes: number[], period: number): (number | null)[] {
+  const gains: number[] = [0];
+  const losses: number[] = [0];
+  for (let i = 1; i < closes.length; i++) {
+    const d = closes[i] - closes[i - 1];
+    gains.push(Math.max(d, 0));
+    losses.push(Math.max(-d, 0));
+  }
+  return closes.map((_, i) => {
+    if (i < period) return null;
+    let g = 0, l = 0;
+    for (let j = i - period + 1; j <= i; j++) { g += gains[j]; l += losses[j]; }
+    if (l === 0) return 100;
+    return 100 - 100 / (1 + g / l);
+  });
+}
+
 export function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
   const idx = (p / 100) * (sorted.length - 1);

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { fetchIndexQuote, fetchCandles, fetchQuote, KOSPI_STOCKS, KOSDAQ_STOCKS } from '../lib/marketData';
+import { fetchIndexQuote, fetchCandles, fetchQuote, ALL_STOCKS, stockName, KOSPI_STOCKS, KOSDAQ_STOCKS } from '../lib/marketData';
 import { getStrategy, initStrategy } from '../lib/strategies';
 import type { StratScan, Tone } from '../lib/strategies/types';
 import { useAuth } from '../context/AuthContext';
@@ -11,6 +11,15 @@ import Stars from '../components/Stars';
 
 interface IndexQuote { label: string; price: number; changePct: number }
 
+const DEFAULT_DASH = ['005930.KS', '000660.KS']; // 삼성전자 · SK하이닉스
+const MAX_DASH = 5;
+const loadDashSymbols = (): string[] => {
+  try {
+    const s = JSON.parse(localStorage.getItem('dashStocks') ?? 'null');
+    return Array.isArray(s) && s.length ? s.slice(0, MAX_DASH) : DEFAULT_DASH;
+  } catch { return DEFAULT_DASH; }
+};
+
 const toneCls = (t?: Tone) =>
   t === 'up' ? 'text-up' : t === 'down' ? 'text-down' : t === 'accent' ? 'text-accent' : t === 'muted' ? 'text-slate-500' : 'text-slate-200';
 
@@ -18,7 +27,9 @@ export default function DashboardPage() {
   const { profile, guestMode, allowedStrategyCodes } = useAuth();
   const [stratCode, setStratCode] = useStrategySelection();
   const [indices, setIndices] = useState<IndexQuote[]>([]);
-  const [stockQuotes, setStockQuotes] = useState<IndexQuote[]>([]);
+  const [dashSymbols, setDashSymbols] = useState<string[]>(loadDashSymbols);
+  const [stockQuotes, setStockQuotes] = useState<Record<string, { price: number; changePct: number }>>({});
+  const [editStocks, setEditStocks] = useState(false);
   const [signals, setSignals] = useState<StratScan[]>([]);
   const [account, setAccount] = useState<{ cash: number; initial: number; posCount: number } | null>(null);
   const [scanning, setScanning] = useState(true);
@@ -40,13 +51,8 @@ export default function DashboardPage() {
     ]);
     if (kospi.demo) setDemo(true);
 
-    // 대표 종목 (삼성전자·SK하이닉스) 현재가·등락
-    const [samsung, hynix] = await Promise.all([fetchQuote('005930.KS'), fetchQuote('000660.KS')]);
-    setStockQuotes([
-      { label: '삼성전자', price: samsung.price, changePct: samsung.changePct },
-      { label: 'SK하이닉스', price: hynix.price, changePct: hynix.changePct },
-    ]);
-    if (samsung.demo) setDemo(true);
+    // 개별 종목 카드 (설정된 종목들) 현재가·등락
+    await loadStockQuotes(dashSymbols);
 
     // 오늘 신호: 주요 종목 상위 간이 스캔 (선택 전략)
     const universe = [...KOSPI_STOCKS.slice(0, 6), ...KOSDAQ_STOCKS.slice(0, 2)];
@@ -73,9 +79,30 @@ export default function DashboardPage() {
         .eq('status', 'OPEN');
       if (acc) setAccount({ cash: Number(acc.cash), initial: Number(acc.initial_balance), posCount: count ?? 0 });
     }
-  }, [mod, guestMode, profile]);
+  }, [mod, guestMode, profile, dashSymbols]);
+
+  const loadStockQuotes = async (symbols: string[]) => {
+    const entries = await Promise.all(symbols.map(async (sym) => {
+      try { const q = await fetchQuote(sym); if (q.demo) setDemo(true); return [sym, { price: q.price, changePct: q.changePct }] as const; }
+      catch { return [sym, { price: 0, changePct: 0 }] as const; }
+    }));
+    setStockQuotes(Object.fromEntries(entries));
+  };
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  const persistDash = (next: string[]) => { setDashSymbols(next); localStorage.setItem('dashStocks', JSON.stringify(next)); };
+  const addStock = (sym: string) => {
+    if (!sym || dashSymbols.includes(sym) || dashSymbols.length >= MAX_DASH) return;
+    const next = [...dashSymbols, sym];
+    persistDash(next);
+    loadStockQuotes(next);
+  };
+  const removeStock = (sym: string) => {
+    const next = dashSymbols.filter((s) => s !== sym);
+    persistDash(next);
+    loadStockQuotes(next);
+  };
 
   const fmt = (n: number) => n.toLocaleString('ko-KR', { maximumFractionDigits: 0 });
 
@@ -88,6 +115,7 @@ export default function DashboardPage() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           {demo && <span className="badge bg-amber-500/20 text-amber-400">데모 데이터 (실시세 조회 불가 시 합성 데이터)</span>}
+          <button className="btn-ghost" onClick={() => setEditStocks((v) => !v)}>🔧 표시 종목 편집</button>
           <StrategyPicker value={stratCode} onChange={setStratCode} />
           <button className="btn-primary" onClick={refresh} disabled={scanning}>
             {scanning ? '갱신 중...' : '🔄 시세 갱신'}
@@ -96,14 +124,47 @@ export default function DashboardPage() {
       </header>
       {refreshedAt && <div className="text-xs text-slate-500 -mt-3">최근 갱신: {refreshedAt.toLocaleString('ko-KR')}</div>}
 
+      {/* 개별 종목 카드 편집 패널 */}
+      {editStocks && (
+        <div className="card space-y-3">
+          <div className="flex items-center justify-between">
+            <h3 className="font-bold text-white text-sm">대시보드 표시 종목 ({dashSymbols.length}/{MAX_DASH})</h3>
+            <button className="text-slate-500 hover:text-white text-sm" onClick={() => setEditStocks(false)}>✕ 닫기</button>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {dashSymbols.map((sym) => (
+              <span key={sym} className="badge bg-edge text-slate-200 flex items-center gap-1">
+                {stockName(sym)}
+                <button className="text-red-400 hover:text-red-300 ml-1" onClick={() => removeStock(sym)}>✕</button>
+              </span>
+            ))}
+            {dashSymbols.length === 0 && <span className="text-slate-500 text-sm">표시할 종목이 없습니다.</span>}
+          </div>
+          <div className="flex items-center gap-2">
+            <select
+              className="input w-56"
+              value=""
+              disabled={dashSymbols.length >= MAX_DASH}
+              onChange={(e) => { addStock(e.target.value); e.target.value = ''; }}
+            >
+              <option value="">＋ 종목 추가{dashSymbols.length >= MAX_DASH ? ' (최대 5개)' : ''}</option>
+              {ALL_STOCKS.filter((s) => !dashSymbols.includes(s.symbol)).map((s) => (
+                <option key={s.symbol} value={s.symbol}>{s.name} ({s.market})</option>
+              ))}
+            </select>
+            <span className="text-xs text-slate-500">최대 5개까지 선택할 수 있습니다.</span>
+          </div>
+        </div>
+      )}
+
       {!enabled && (
         <div className="card bg-red-500/10 border-red-500/40 text-red-300 text-sm">
           현재 계정에서 해당 전략 사용 권한이 비활성화되어 있습니다. 관리자에게 문의하세요.
         </div>
       )}
 
-      {/* 지수 + 대표종목 + 계좌 카드 */}
-      <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
+      {/* 고정 카드(KOSPI·KOSDAQ·모의투자·활성전략) + 개별종목 카드. 종목 수에 따라 카드 크기 유동 */}
+      <div className="grid gap-4" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))' }}>
         {indices.map((ix) => (
           <div key={ix.label} className="card">
             <div className="text-xs text-slate-400">{ix.label}</div>
@@ -113,15 +174,18 @@ export default function DashboardPage() {
             </div>
           </div>
         ))}
-        {stockQuotes.map((s) => (
-          <div key={s.label} className="card">
-            <div className="text-xs text-slate-400">{s.label}</div>
-            <div className="text-xl font-bold text-white mt-1">{s.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}</div>
-            <div className={`text-sm mt-0.5 ${s.changePct >= 0 ? 'text-up' : 'text-down'}`}>
-              {s.changePct >= 0 ? '▲' : '▼'} {Math.abs(s.changePct).toFixed(2)}%
+        {dashSymbols.map((sym) => {
+          const q = stockQuotes[sym];
+          return (
+            <div key={sym} className="card">
+              <div className="text-xs text-slate-400 truncate">{stockName(sym)}</div>
+              <div className="text-xl font-bold text-white mt-1">{q ? q.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 }) : '…'}</div>
+              <div className={`text-sm mt-0.5 ${(q?.changePct ?? 0) >= 0 ? 'text-up' : 'text-down'}`}>
+                {q ? `${q.changePct >= 0 ? '▲' : '▼'} ${Math.abs(q.changePct).toFixed(2)}%` : '-'}
+              </div>
             </div>
-          </div>
-        ))}
+          );
+        })}
         <div className="card">
           <div className="text-xs text-slate-400">모의투자 가용현금</div>
           <div className="text-xl font-bold text-white mt-1">

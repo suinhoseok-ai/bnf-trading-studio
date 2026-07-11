@@ -6,6 +6,7 @@ import { pullback } from './pullback';
 import { alignment } from './alignment';
 import { box } from './box';
 import { rebound } from './rebound';
+import { disparity } from './disparity';
 import { fetchCandles } from '../marketData';
 
 export * from './types';
@@ -13,11 +14,11 @@ export { simulate, manageOpen } from './engine';
 
 /** 코드 → 전략 모듈 */
 export const STRATEGIES: Record<string, StrategyModule> = {
-  bnf1, breakout, pullback, alignment, box, rebound,
+  bnf1, breakout, pullback, alignment, box, rebound, disparity,
 };
 
 /** 전략 노출 순서 */
-export const STRATEGY_ORDER = ['bnf1', 'breakout', 'pullback', 'alignment', 'box', 'rebound'];
+export const STRATEGY_ORDER = ['bnf1', 'breakout', 'pullback', 'alignment', 'box', 'rebound', 'disparity'];
 
 /** 클라이언트용 전략 초기화 (시장 지수 등 외부 데이터 준비) — compute 전에 호출 */
 export async function initStrategy(mod: StrategyModule): Promise<void> {

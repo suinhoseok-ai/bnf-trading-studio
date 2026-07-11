@@ -24,6 +24,12 @@
   to = "/.netlify/functions/run-report"
   status = 200
 
+# 자동매매 브로커 API
+[[redirects]]
+  from = "/api/broker"
+  to = "/.netlify/functions/broker"
+  status = 200
+
 # SPA 라우팅 fallback
 [[redirects]]
   from = "/*"

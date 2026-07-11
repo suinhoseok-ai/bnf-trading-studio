@@ -1,0 +1,250 @@
+// ===== 자동매매 엔진 (Netlify 예약 함수 — 브라우저 없이 24시간 동작) =====
+// 장중 10분 주기로 실행. AI를 사용하지 않으며, 전략 엔진의 트리거만으로 주문한다.
+//
+// Flow (사용자별):
+//  1. 장중 + 실행주기 확인
+//  2. Broker Adapter 연결 (토큰 캐시)
+//  3. [매도] 보유 전략 포지션 → 전략 stepOpen 트리거 → 시장가 매도
+//  4. [매수] 유니버스 스캔 → 매수 트리거 → 예산 내 시장가 매수
+//  5. 거래이력·로그 DB 저장 + 텔레그램 알림
+//
+// 필요한 환경변수: SUPABASE_URL(또는 VITE_), SUPABASE_SERVICE_ROLE_KEY, (권장) BROKER_ENC_KEY
+import { createClient, SupabaseClient } from '@supabase/supabase-js';
+import type { Candle } from '../../src/lib/types';
+import { getStrategy } from '../../src/lib/strategies';
+import type { StratRow, OpenPos } from '../../src/lib/strategies/types';
+import { universeStocks } from '../../src/lib/marketData';
+import { isKoreanMarketOpen } from '../../src/lib/market-hours';
+import { getAdapter, decryptSecret, toKrCode, BrokerAdapter, BrokerCredentials, TokenCache } from '../../src/lib/broker';
+
+export const config = { schedule: '*/10 * * * *' };
+
+const UNIVERSE_CAP = 25;      // 회당 매수 스캔 종목 상한 (함수 실행시간 보호)
+const MAX_BUYS_PER_RUN = 3;   // 회당 신규 매수 상한
+const BATCH = 6;
+
+async function fetchCandlesServer(symbol: string, interval: string, range: string): Promise<Candle[]> {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
+  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BNFStudio/1.0)' } });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const json = await res.json();
+  const result = json?.chart?.result?.[0];
+  if (!result) throw new Error('no data');
+  const ts: number[] = result.timestamp ?? [];
+  const q = result.indicators?.quote?.[0] ?? {};
+  const out: Candle[] = [];
+  for (let i = 0; i < ts.length; i++) {
+    const o = q.open?.[i], h = q.high?.[i], l = q.low?.[i], c = q.close?.[i];
+    if (o == null || h == null || l == null || c == null) continue;
+    out.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: q.volume?.[i] ?? 0 });
+  }
+  return out;
+}
+
+async function tgSend(token: string, chatId: string, text: string) {
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML', disable_web_page_preview: true }),
+    });
+  } catch { /* 알림 실패는 매매에 영향 주지 않음 */ }
+}
+
+interface SettingsRow {
+  user_id: string; broker: string; mode: 'paper' | 'real';
+  app_key: string; app_secret: string; account_no: string; account_product_cd: string;
+  enabled: boolean; status: string; strategy_code: string; universe: string;
+  interval_min: number; max_positions: number; budget_pct: number;
+  token: TokenCache; last_run_at: string | null;
+}
+
+export default async () => {
+  if (!isKoreanMarketOpen()) return new Response('skip: market closed');
+
+  const url = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) { console.log('[trader] env 미설정'); return new Response('skip: env'); }
+  const sb = createClient(url, key, { auth: { persistSession: false } });
+
+  const { data: rows } = await sb.from('bnf_trading_settings').select('*').eq('enabled', true).eq('status', 'RUNNING');
+  if (!rows?.length) return new Response('skip: no active traders');
+
+  const now = Date.now();
+  const results: string[] = [];
+  // 캔들 캐시 (동일 심볼·주기 재사용)
+  const candleCache = new Map<string, Candle[]>();
+  const getCandles = async (symbol: string, interval: string, range: string) => {
+    const k = `${symbol}|${interval}`;
+    const hit = candleCache.get(k);
+    if (hit) return hit;
+    const c = await fetchCandlesServer(symbol, interval, range);
+    candleCache.set(k, c);
+    return c;
+  };
+
+  for (const raw of rows as SettingsRow[]) {
+    const uid = raw.user_id;
+    const log = (level: string, event: string, detail: string) =>
+      sb.from('bnf_trade_logs').insert({ user_id: uid, level, event, detail });
+
+    // 실행 주기 확인
+    if (raw.last_run_at && now - new Date(raw.last_run_at).getTime() < Math.max(10, raw.interval_min) * 60_000 - 30_000) continue;
+
+    // 텔레그램 설정 (체결 알림용)
+    const { data: prof } = await sb.from('bnf_profiles').select('settings').eq('id', uid).maybeSingle();
+    const tg = (prof?.settings as Record<string, Record<string, unknown>> | null)?.telegram ?? {};
+    const notify = (text: string) => {
+      if (tg.botToken && tg.chatId) return tgSend(String(tg.botToken), String(tg.chatId), text);
+      return Promise.resolve();
+    };
+
+    try {
+      const creds: BrokerCredentials = {
+        appKey: decryptSecret(raw.app_key), appSecret: decryptSecret(raw.app_secret),
+        accountNo: raw.account_no, accountProductCd: raw.account_product_cd || '01', mode: raw.mode,
+      };
+      const adapter: BrokerAdapter = getAdapter(raw.broker, creds, raw.token ?? {}, async (t) => {
+        await sb.from('bnf_trading_settings').update({ token: t }).eq('user_id', uid);
+      });
+      await adapter.connect();
+
+      const mod = getStrategy(raw.strategy_code || 'bnf1');
+      await mod.init?.(fetchCandlesServer);
+      const modeTag = raw.mode === 'real' ? '실전' : '모의';
+
+      // ── 1. 매도 트리거 (보유 전략 포지션) ──
+      const { data: openPos } = await sb.from('bnf_live_positions').select('*').eq('user_id', uid).eq('status', 'OPEN');
+      const brokerPositions = await adapter.getPositions();
+      const brokerQty = new Map(brokerPositions.map((p) => [p.symbol, p.sellableQty]));
+
+      for (const pos of openPos ?? []) {
+        const p = pos as { id: number; symbol: string; name: string; strategy_code: string; entry_price: number; shares: number; sl: number; tp1_hit: boolean; opened_at: string };
+        try {
+          const pmod = getStrategy(p.strategy_code || raw.strategy_code);
+          await pmod.init?.(fetchCandlesServer);
+          const candles = await getCandles(p.symbol, pmod.interval, pmod.range);
+          const stratRows: StratRow[] = pmod.compute(candles);
+          const last = stratRows[stratRows.length - 1];
+          if (!last) continue;
+
+          const state: OpenPos = {
+            symbol: p.symbol, name: p.name, entry_price: Number(p.entry_price),
+            shares: Number(p.shares), sl: Number(p.sl), tp1_hit: p.tp1_hit, opened_at: p.opened_at,
+          };
+          const { events, updated } = pmod.stepOpen(state, last);
+          if (events.length === 0) continue;
+
+          const code = toKrCode(p.symbol);
+          const held = brokerQty.get(code) ?? 0;
+
+          for (const ev of events) {
+            const qty = Math.min(Math.floor(ev.shares), held);
+            if (qty < 1) {
+              await log('warn', '매도 스킵', `${p.name}: 거래소 매도가능수량 부족 (전략 ${Math.floor(ev.shares)}주 vs 보유 ${held}주)`);
+              continue;
+            }
+            const r = await adapter.placeSellOrder(p.symbol, qty, 0); // 시장가
+            const estPnl = qty * (last.close - Number(p.entry_price));
+            await sb.from('bnf_live_trades').insert({
+              user_id: uid, broker: raw.broker, mode: raw.mode, symbol: p.symbol, name: p.name,
+              strategy_code: p.strategy_code, side: ev.side, trigger_note: ev.note,
+              order_type: 'market', order_price: ev.price, qty, pnl: estPnl,
+              order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
+            });
+            await log(r.ok ? 'info' : 'error', `매도 트리거 (${ev.side})`,
+              `${p.name} ${qty}주 · ${ev.note} → ${r.ok ? `접수 ${r.orderNo}` : `실패: ${r.message}`}`);
+            if (r.ok) {
+              await notify(`🔻 <b>[자동매매·${modeTag}] 매도 주문</b>\n${p.name} ${qty}주 (시장가)\n사유: ${ev.note}\n추정손익: ${Math.round(estPnl).toLocaleString('ko-KR')}원`);
+            }
+          }
+          // 전략 상태 갱신
+          if (updated == null) {
+            await sb.from('bnf_live_positions').update({ status: 'CLOSED', closed_at: new Date().toISOString() }).eq('id', p.id);
+          } else if (events.length > 0) {
+            await sb.from('bnf_live_positions').update({ shares: updated.shares, sl: updated.sl, tp1_hit: updated.tp1_hit }).eq('id', p.id);
+          }
+        } catch (e) {
+          await log('error', '매도 처리 오류', `${p.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+
+      // ── 2. 매수 트리거 (유니버스 스캔) ──
+      const { count: openCount } = await sb.from('bnf_live_positions')
+        .select('id', { count: 'exact', head: true }).eq('user_id', uid).eq('status', 'OPEN');
+      let slots = Math.max(0, raw.max_positions - (openCount ?? 0));
+      let buys = 0;
+
+      if (slots > 0) {
+        const account = await adapter.getAccount();
+        let cash = account.cash;
+        const heldSymbols = new Set([
+          ...brokerPositions.map((p) => p.symbol),
+          ...(openPos ?? []).map((p) => toKrCode((p as { symbol: string }).symbol)),
+        ]);
+        const stocks = universeStocks(raw.universe || 'KOSPI').slice(0, UNIVERSE_CAP);
+
+        // 신호 수집 (배치)
+        const signals: { symbol: string; name: string; rows: StratRow[] }[] = [];
+        for (let i = 0; i < stocks.length; i += BATCH) {
+          await Promise.all(stocks.slice(i, i + BATCH).map(async (s) => {
+            if (heldSymbols.has(toKrCode(s.symbol))) return;
+            try {
+              const candles = await getCandles(s.symbol, mod.interval, mod.range);
+              if (candles.length < 30) return;
+              const rs = mod.compute(candles);
+              if (rs[rs.length - 1]?.buy) signals.push({ symbol: s.symbol, name: s.name, rows: rs });
+            } catch { /* skip */ }
+          }));
+        }
+
+        for (const sig of signals) {
+          if (slots <= 0 || buys >= MAX_BUYS_PER_RUN) break;
+          const lastRow = sig.rows[sig.rows.length - 1];
+          // planEntry에서는 손절가(sl)·트리거 설명만 사용, 수량은 사용자 예산(budget_pct)으로 별도 계산
+          const plan = mod.planEntry(sig.rows, sig.rows.length - 1, cash);
+          if (!plan) continue;
+          const budget = cash * (raw.budget_pct / 100);
+          const qty = Math.floor(budget / lastRow.close);
+          if (qty < 1) { await log('warn', '매수 스킵', `${sig.name}: 예산 부족 (예산 ${Math.round(budget).toLocaleString('ko-KR')}원 < 1주)`); continue; }
+
+          const r = await adapter.placeBuyOrder(sig.symbol, qty, 0); // 시장가
+          await sb.from('bnf_live_trades').insert({
+            user_id: uid, broker: raw.broker, mode: raw.mode, symbol: sig.symbol, name: sig.name,
+            strategy_code: mod.code, side: 'BUY', trigger_note: plan.note,
+            order_type: 'market', order_price: lastRow.close, qty,
+            order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
+          });
+          await log(r.ok ? 'info' : 'error', '매수 트리거',
+            `${sig.name} ${qty}주 @~${Math.round(lastRow.close).toLocaleString('ko-KR')} · ${plan.note} → ${r.ok ? `접수 ${r.orderNo}` : `실패: ${r.message}`}`);
+          if (r.ok) {
+            await sb.from('bnf_live_positions').insert({
+              user_id: uid, broker: raw.broker, symbol: sig.symbol, name: sig.name,
+              strategy_code: mod.code, entry_price: lastRow.close, shares: qty,
+              sl: plan.sl, tp1_hit: false, order_no: r.orderNo ?? '',
+            });
+            await notify(`🟢 <b>[자동매매·${modeTag}] 매수 주문</b>\n${sig.name} ${qty}주 (시장가 ~${Math.round(lastRow.close).toLocaleString('ko-KR')}원)\n전략: ${mod.name.split('·')[0].trim()}\n${plan.note}`);
+            cash -= qty * lastRow.close;
+            slots--; buys++;
+          }
+        }
+      }
+
+      await sb.from('bnf_trading_settings').update({
+        last_run_at: new Date().toISOString(), last_error: '', updated_at: new Date().toISOString(),
+      }).eq('user_id', uid);
+      results.push(`${uid.slice(0, 8)}:ok(buys=${buys})`);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await sb.from('bnf_trading_settings').update({
+        status: 'ERROR', last_error: msg, last_run_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+      }).eq('user_id', uid);
+      await log('error', '자동매매 실행 오류', msg);
+      await notify(`⚠️ <b>[자동매매] 오류로 일시 중지</b>\n${msg}\n웹 자동매매 페이지에서 확인 후 다시 시작하세요.`);
+      results.push(`${uid.slice(0, 8)}:error`);
+    }
+  }
+
+  console.log('[trader]', results.join(' '));
+  return new Response(results.join(' ') || 'skip');
+};

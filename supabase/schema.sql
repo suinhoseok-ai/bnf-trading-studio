@@ -92,7 +92,11 @@ insert into public.bnf_strategies (code, name, description, enabled, params) val
   ('rebound', '전략6 · 과매도 반등 + 시장 필터',
    '하락장(KOSPI<200일선) 전용 역추세: 종가가 5일선 아래 + RSI(2) 10 이하 극단 과매도 시 매수. 5일선 회복 익절, 최대 5영업일 시간 청산.',
    true,
-   '{"rsiPeriod":2,"rsiThresh":10,"smaPeriod":5,"indexSma":200,"maxDays":5,"positionPct":20}'::jsonb)
+   '{"rsiPeriod":2,"rsiThresh":10,"smaPeriod":5,"indexSma":200,"maxDays":5,"positionPct":20}'::jsonb),
+  ('disparity', '전략7 · 25일 EMA 이격도 낙주',
+   '종가가 25 EMA 대비 과도 하락 이격 + 지지선 근접 + RSI(14) 30 이하 + MACD 히스토그램 상향 반전 시 낙주 매수. 지지선 이탈 손절, 1:2 손익비 익절.',
+   true,
+   '{"emaPeriod":25,"rsiPeriod":14,"rsiThresh":30,"bullDisparity":20,"bearDisparity":30,"supportLookback":40,"riskReward":2,"positionPct":20}'::jsonb)
 on conflict (code) do nothing;
 
 -- ------------------------------------------------------------
@@ -191,6 +195,80 @@ create table if not exists public.bnf_user_positions (
 );
 
 -- ------------------------------------------------------------
+-- 6.7 자동매매 (실거래) — Broker Adapter 기반
+-- ------------------------------------------------------------
+-- 사용자별 자동매매 설정 (증권사 API 키는 서버에서 AES-GCM 암호화되어 저장됨)
+create table if not exists public.bnf_trading_settings (
+  user_id uuid primary key references public.bnf_profiles(id) on delete cascade,
+  broker text not null default 'kis' check (broker in ('kis', 'toss')),
+  mode text not null default 'paper' check (mode in ('paper', 'real')),   -- paper=모의투자, real=실전
+  app_key text default '',        -- 암호화 저장 (enc: / plain: 접두사)
+  app_secret text default '',     -- 암호화 저장
+  account_no text default '',     -- 계좌번호 앞 8자리
+  account_product_cd text default '01',  -- 계좌상품코드 뒤 2자리
+  enabled boolean not null default false,
+  status text not null default 'STOPPED' check (status in ('RUNNING', 'PAUSED', 'STOPPED', 'ERROR')),
+  strategy_code text not null default 'bnf1',
+  universe text not null default 'KOSPI',
+  interval_min int not null default 10,
+  max_positions int not null default 5,
+  budget_pct numeric not null default 10,   -- 매수 1회당 주문가능현금 대비 비중(%)
+  token jsonb default '{}'::jsonb,          -- 브로커 액세스 토큰 캐시
+  last_run_at timestamptz,
+  last_error text default '',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+-- 자동매매 전략 포지션 상태 (전략 청산 로직용 — 실계좌 잔고와 별개로 sl/tp1 상태 추적)
+create table if not exists public.bnf_live_positions (
+  id bigserial primary key,
+  user_id uuid not null references public.bnf_profiles(id) on delete cascade,
+  broker text not null default 'kis',
+  symbol text not null,
+  name text default '',
+  strategy_code text not null default 'bnf1',
+  entry_price numeric not null,
+  shares numeric not null,
+  sl numeric not null default 0,
+  tp1_hit boolean not null default false,
+  status text not null default 'OPEN' check (status in ('OPEN', 'CLOSED')),
+  order_no text default '',
+  opened_at timestamptz not null default now(),
+  closed_at timestamptz
+);
+
+-- 자동매매 거래 이력 (모든 주문·체결 기록, 삭제하지 않음)
+create table if not exists public.bnf_live_trades (
+  id bigserial primary key,
+  user_id uuid not null references public.bnf_profiles(id) on delete cascade,
+  broker text not null default 'kis',
+  mode text not null default 'paper',
+  symbol text not null,
+  name text default '',
+  strategy_code text default '',
+  side text not null,             -- BUY / SELL_TP1 / SELL_TP2 / SELL_SL / FORCE_SELL
+  trigger_note text default '',   -- 트리거 설명 (전략 신호 내용)
+  order_type text not null default 'market',
+  order_price numeric default 0,
+  qty numeric not null,
+  pnl numeric default 0,
+  order_no text default '',
+  status text not null default 'SUBMITTED',  -- SUBMITTED / FAILED
+  executed_at timestamptz not null default now()
+);
+
+-- 자동매매 로그 (트리거/주문/응답/오류 — 삭제하지 않음)
+create table if not exists public.bnf_trade_logs (
+  id bigserial primary key,
+  user_id uuid not null references public.bnf_profiles(id) on delete cascade,
+  level text not null default 'info' check (level in ('info', 'warn', 'error')),
+  event text not null,
+  detail text default '',
+  created_at timestamptz not null default now()
+);
+
+-- ------------------------------------------------------------
 -- 7. 관리자 전역 설정 (일일 이메일 스캔 리포트 등) — 단일 행
 -- ------------------------------------------------------------
 create table if not exists public.bnf_admin_config (
@@ -213,6 +291,10 @@ alter table public.bnf_paper_positions enable row level security;
 alter table public.bnf_paper_trades enable row level security;
 alter table public.bnf_backtest_results enable row level security;
 alter table public.bnf_user_positions enable row level security;
+alter table public.bnf_trading_settings enable row level security;
+alter table public.bnf_live_positions enable row level security;
+alter table public.bnf_live_trades enable row level security;
+alter table public.bnf_trade_logs enable row level security;
 alter table public.bnf_admin_config enable row level security;
 
 -- bnf_profiles: 본인 조회/수정(settings), 관리자 전체 조회/수정
@@ -262,6 +344,22 @@ create policy "backtest_results_own" on public.bnf_backtest_results
 
 drop policy if exists "user_positions_own" on public.bnf_user_positions;
 create policy "user_positions_own" on public.bnf_user_positions
+  for all using (user_id = auth.uid() or public.is_admin());
+
+drop policy if exists "trading_settings_own" on public.bnf_trading_settings;
+create policy "trading_settings_own" on public.bnf_trading_settings
+  for all using (user_id = auth.uid() or public.is_admin());
+
+drop policy if exists "live_positions_own" on public.bnf_live_positions;
+create policy "live_positions_own" on public.bnf_live_positions
+  for all using (user_id = auth.uid() or public.is_admin());
+
+drop policy if exists "live_trades_own" on public.bnf_live_trades;
+create policy "live_trades_own" on public.bnf_live_trades
+  for all using (user_id = auth.uid() or public.is_admin());
+
+drop policy if exists "trade_logs_own" on public.bnf_trade_logs;
+create policy "trade_logs_own" on public.bnf_trade_logs
   for all using (user_id = auth.uid() or public.is_admin());
 
 -- bnf_admin_config: 로그인 사용자 조회, 관리자만 변경
