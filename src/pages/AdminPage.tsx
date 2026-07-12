@@ -138,7 +138,7 @@ export default function AdminPage() {
   if (guestMode) {
     return (
       <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-white">관리자</h1>
+        <h1 className="text-2xl font-bold text-ink">관리자</h1>
         <div className="card text-sm text-amber-300 bg-amber-500/10 border-amber-500/40">
           게스트 데모 모드에서는 관리자 기능(회원 승인, 전략 권한 관리)을 사용할 수 없습니다.
           <code className="bg-base px-1 rounded mx-1">.env</code>에 Supabase 설정 후 이용하세요.
@@ -151,7 +151,7 @@ export default function AdminPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">관리자</h1>
+          <h1 className="text-2xl font-bold text-ink">관리자</h1>
           <p className="text-sm text-slate-400 mt-1">회원 승인 · 전략 사용유무 · 사용자별 권한 관리</p>
         </div>
         {msg && <span className="badge bg-profit/20 text-profit">{msg}</span>}
@@ -178,7 +178,7 @@ export default function AdminPage() {
             <tbody>
               {users.map((u) => (
                 <tr key={u.id} className="border-b border-edge/50">
-                  <td className="td text-white">{u.email}{u.id === me?.id && <span className="text-xs text-accent ml-1">(나)</span>}</td>
+                  <td className="td text-ink">{u.email}{u.id === me?.id && <span className="text-xs text-accent ml-1">(나)</span>}</td>
                   <td className="td">{u.name || '-'}</td>
                   <td className="td text-slate-400">{new Date(u.created_at).toLocaleDateString('ko-KR')}</td>
                   <td className="td">
@@ -221,7 +221,7 @@ export default function AdminPage() {
           {strategies.map((s) => (
             <div key={s.id} className="card flex items-start justify-between gap-4">
               <div>
-                <div className="font-bold text-white">{s.name} <span className="text-xs text-slate-500">({s.code})</span></div>
+                <div className="font-bold text-ink">{s.name} <span className="text-xs text-slate-500">({s.code})</span></div>
                 <p className="text-sm text-slate-400 mt-1 leading-relaxed">{s.description}</p>
                 <div className="text-xs text-slate-500 mt-2">
                   파라미터: {Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(' · ')}
@@ -264,7 +264,7 @@ export default function AdminPage() {
                   const effective = override != null ? override : s.enabled;
                   return (
                     <tr key={s.id} className="border-b border-edge/50">
-                      <td className="td text-white">{s.name}</td>
+                      <td className="td text-ink">{s.name}</td>
                       <td className="td">{s.enabled ? '사용' : '중지'}</td>
                       <td className="td">
                         {override == null ? <span className="text-slate-500">전역 따름</span> : override ? '허용' : '차단'}
@@ -297,7 +297,7 @@ export default function AdminPage() {
       {tab === 'report' && (
         <div className="card space-y-4 max-w-2xl">
           <div className="flex items-center justify-between">
-            <h3 className="font-bold text-white">일일 이메일 스캔 리포트</h3>
+            <h3 className="font-bold text-ink">일일 이메일 스캔 리포트</h3>
             <label className="flex items-center gap-2 text-sm text-slate-300">
               <input type="checkbox" checked={!!report.reportEnabled} onChange={(e) => setRep('reportEnabled', e.target.checked)} />
               리포트 켜기
@@ -365,7 +365,7 @@ export default function AdminPage() {
           {/* ── 전체 리포트 메일 (전 전략 × 주요 종목) ── */}
           <div className="border-t border-edge pt-4 space-y-4">
             <div className="flex items-center justify-between">
-              <h3 className="font-bold text-white">전체 리포트 메일 (전 전략 × 코스피15 + 코스닥8)</h3>
+              <h3 className="font-bold text-ink">전체 리포트 메일 (전 전략 × 코스피15 + 코스닥8)</h3>
               <label className="flex items-center gap-2 text-sm text-slate-300">
                 <input type="checkbox" checked={!!report.fullReportEnabled} onChange={(e) => setRep('fullReportEnabled', e.target.checked)} />
                 켜기

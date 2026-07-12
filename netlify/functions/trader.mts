@@ -13,6 +13,7 @@ import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import type { Candle } from '../../src/lib/types';
 import { getStrategy } from '../../src/lib/strategies';
 import type { StratRow, OpenPos } from '../../src/lib/strategies/types';
+import { starsFromScore } from '../../src/lib/strategies/engine';
 import { universeStocks } from '../../src/lib/marketData';
 import { isKoreanMarketOpen } from '../../src/lib/market-hours';
 import { getAdapter, decryptSecret, toKrCode, BrokerAdapter, BrokerCredentials, TokenCache } from '../../src/lib/broker';
@@ -20,25 +21,35 @@ import { getAdapter, decryptSecret, toKrCode, BrokerAdapter, BrokerCredentials, 
 export const config = { schedule: '*/10 * * * *' };
 
 const UNIVERSE_CAP = 25;      // 회당 매수 스캔 종목 상한 (함수 실행시간 보호)
-const MAX_BUYS_PER_RUN = 3;   // 회당 신규 매수 상한
+const MAX_BUYS_PER_RUN = 5;   // 회당 신규 매수 상한 (다중 전략 병행 실행 고려 상향)
 const BATCH = 6;
 
+const YAHOO_HOSTS = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'];
+
 async function fetchCandlesServer(symbol: string, interval: string, range: string): Promise<Candle[]> {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
-  const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BNFStudio/1.0)' } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  const json = await res.json();
-  const result = json?.chart?.result?.[0];
-  if (!result) throw new Error('no data');
-  const ts: number[] = result.timestamp ?? [];
-  const q = result.indicators?.quote?.[0] ?? {};
-  const out: Candle[] = [];
-  for (let i = 0; i < ts.length; i++) {
-    const o = q.open?.[i], h = q.high?.[i], l = q.low?.[i], c = q.close?.[i];
-    if (o == null || h == null || l == null || c == null) continue;
-    out.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: q.volume?.[i] ?? 0 });
+  let lastErr: unknown;
+  for (const host of YAHOO_HOSTS) {
+    try {
+      const url = `${host}/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (compatible; BNFStudio/1.0)' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      const result = json?.chart?.result?.[0];
+      if (!result) throw new Error(json?.chart?.error?.description ?? 'no data');
+      const ts: number[] = result.timestamp ?? [];
+      const q = result.indicators?.quote?.[0] ?? {};
+      const out: Candle[] = [];
+      for (let i = 0; i < ts.length; i++) {
+        const o = q.open?.[i], h = q.high?.[i], l = q.low?.[i], c = q.close?.[i];
+        if (o == null || h == null || l == null || c == null) continue;
+        out.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: q.volume?.[i] ?? 0 });
+      }
+      return out;
+    } catch (e) {
+      lastErr = e;
+    }
   }
-  return out;
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
 async function tgSend(token: string, chatId: string, text: string) {
@@ -109,9 +120,13 @@ export default async () => {
       });
       await adapter.connect();
 
-      const mod = getStrategy(raw.strategy_code || 'bnf1');
-      await mod.init?.(fetchCandlesServer);
       const modeTag = raw.mode === 'real' ? '실전' : '모의';
+
+      // 사용자별 다중 전략 예산 (전략별 원화 절대금액 한도, budget=0 또는 미사용은 제외)
+      const { data: stratRows } = await sb.from('bnf_trading_strategies')
+        .select('strategy_code, budget').eq('user_id', uid).eq('enabled', true).gt('budget', 0);
+      const strategies = (stratRows ?? []) as { strategy_code: string; budget: number }[];
+      if (strategies.length === 0) await log('warn', '매수 스캔 생략', '활성화된 전략(예산>0)이 없습니다. 자동매매 페이지에서 전략별 예산을 설정하세요.');
 
       // ── 1. 매도 트리거 (보유 전략 포지션) ──
       const { data: openPos } = await sb.from('bnf_live_positions').select('*').eq('user_id', uid).eq('status', 'OPEN');
@@ -121,7 +136,7 @@ export default async () => {
       for (const pos of openPos ?? []) {
         const p = pos as { id: number; symbol: string; name: string; strategy_code: string; entry_price: number; shares: number; sl: number; tp1_hit: boolean; opened_at: string };
         try {
-          const pmod = getStrategy(p.strategy_code || raw.strategy_code);
+          const pmod = getStrategy(p.strategy_code || 'bnf1');
           await pmod.init?.(fetchCandlesServer);
           const candles = await getCandles(p.symbol, pmod.interval, pmod.range);
           const stratRows: StratRow[] = pmod.compute(candles);
@@ -169,13 +184,13 @@ export default async () => {
         }
       }
 
-      // ── 2. 매수 트리거 (유니버스 스캔) ──
+      // ── 2. 매수 트리거 (전략별 유니버스 스캔 + 예산 내 점수가중 배분) ──
       const { count: openCount } = await sb.from('bnf_live_positions')
         .select('id', { count: 'exact', head: true }).eq('user_id', uid).eq('status', 'OPEN');
       let slots = Math.max(0, raw.max_positions - (openCount ?? 0));
       let buys = 0;
 
-      if (slots > 0) {
+      if (slots > 0 && strategies.length > 0) {
         const account = await adapter.getAccount();
         let cash = account.cash;
         const heldSymbols = new Set([
@@ -184,48 +199,72 @@ export default async () => {
         ]);
         const stocks = universeStocks(raw.universe || 'KOSPI').slice(0, UNIVERSE_CAP);
 
-        // 신호 수집 (배치)
-        const signals: { symbol: string; name: string; rows: StratRow[] }[] = [];
-        for (let i = 0; i < stocks.length; i += BATCH) {
-          await Promise.all(stocks.slice(i, i + BATCH).map(async (s) => {
-            if (heldSymbols.has(toKrCode(s.symbol))) return;
-            try {
-              const candles = await getCandles(s.symbol, mod.interval, mod.range);
-              if (candles.length < 30) return;
-              const rs = mod.compute(candles);
-              if (rs[rs.length - 1]?.buy) signals.push({ symbol: s.symbol, name: s.name, rows: rs });
-            } catch { /* skip */ }
-          }));
-        }
-
-        for (const sig of signals) {
+        for (const strat of strategies) {
           if (slots <= 0 || buys >= MAX_BUYS_PER_RUN) break;
-          const lastRow = sig.rows[sig.rows.length - 1];
-          // planEntry에서는 손절가(sl)·트리거 설명만 사용, 수량은 사용자 예산(budget_pct)으로 별도 계산
-          const plan = mod.planEntry(sig.rows, sig.rows.length - 1, cash);
-          if (!plan) continue;
-          const budget = cash * (raw.budget_pct / 100);
-          const qty = Math.floor(budget / lastRow.close);
-          if (qty < 1) { await log('warn', '매수 스킵', `${sig.name}: 예산 부족 (예산 ${Math.round(budget).toLocaleString('ko-KR')}원 < 1주)`); continue; }
+          const mod = getStrategy(strat.strategy_code);
+          await mod.init?.(fetchCandlesServer);
 
-          const r = await adapter.placeBuyOrder(sig.symbol, qty, 0); // 시장가
-          await sb.from('bnf_live_trades').insert({
-            user_id: uid, broker: raw.broker, mode: raw.mode, symbol: sig.symbol, name: sig.name,
-            strategy_code: mod.code, side: 'BUY', trigger_note: plan.note,
-            order_type: 'market', order_price: lastRow.close, qty,
-            order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
-          });
-          await log(r.ok ? 'info' : 'error', '매수 트리거',
-            `${sig.name} ${qty}주 @~${Math.round(lastRow.close).toLocaleString('ko-KR')} · ${plan.note} → ${r.ok ? `접수 ${r.orderNo}` : `실패: ${r.message}`}`);
-          if (r.ok) {
-            await sb.from('bnf_live_positions').insert({
-              user_id: uid, broker: raw.broker, symbol: sig.symbol, name: sig.name,
-              strategy_code: mod.code, entry_price: lastRow.close, shares: qty,
-              sl: plan.sl, tp1_hit: false, order_no: r.orderNo ?? '',
+          // 이 전략으로 현재 보유 중인 금액(투입액) → 잔여 예산 = 전략 예산 - 투입액
+          const invested = (openPos ?? [])
+            .filter((p) => (p as { strategy_code: string }).strategy_code === strat.strategy_code)
+            .reduce((sum, p) => sum + Number((p as { entry_price: number }).entry_price) * Number((p as { shares: number }).shares), 0);
+          const remainingBudget = Math.max(0, strat.budget - invested);
+          if (remainingBudget < 1) {
+            await log('info', '매수 스킵', `${mod.name}: 전략 예산 소진 (예산 ${Math.round(strat.budget).toLocaleString('ko-KR')}원, 투입 ${Math.round(invested).toLocaleString('ko-KR')}원)`);
+            continue;
+          }
+
+          // 신호 수집 (배치) — 점수(score)까지 함께 계산해 배분 비중으로 사용
+          const signals: { symbol: string; name: string; rows: StratRow[]; score: number }[] = [];
+          for (let i = 0; i < stocks.length; i += BATCH) {
+            await Promise.all(stocks.slice(i, i + BATCH).map(async (s) => {
+              if (heldSymbols.has(toKrCode(s.symbol))) return;
+              try {
+                const candles = await getCandles(s.symbol, mod.interval, mod.range);
+                if (candles.length < 30) return;
+                const rs = mod.compute(candles);
+                if (!rs[rs.length - 1]?.buy) return;
+                const scan = mod.scan(s.symbol, s.name, rs);
+                signals.push({ symbol: s.symbol, name: s.name, rows: rs, score: scan.score });
+              } catch { /* skip */ }
+            }));
+          }
+          if (signals.length === 0) continue;
+
+          // 같은 회차에 잡힌 신호들 = 전략 잔여예산을 점수(추천도) 비중으로 배분
+          const totalScore = signals.reduce((sum, x) => sum + Math.max(1, x.score), 0);
+
+          for (const sig of signals) {
+            if (slots <= 0 || buys >= MAX_BUYS_PER_RUN) break;
+            const lastRow = sig.rows[sig.rows.length - 1];
+            // planEntry에서는 손절가(sl)·트리거 설명만 사용, 수량은 점수가중 배분 예산으로 별도 계산
+            const plan = mod.planEntry(sig.rows, sig.rows.length - 1, cash);
+            if (!plan) continue;
+            const weight = Math.max(1, sig.score) / totalScore;
+            const alloc = Math.min(remainingBudget * weight, cash);
+            const qty = Math.floor(alloc / lastRow.close);
+            if (qty < 1) { await log('warn', '매수 스킵', `${sig.name}: 배분 예산 부족 (${mod.name} 배분액 ${Math.round(alloc).toLocaleString('ko-KR')}원 < 1주, 점수 ${sig.score}·★${starsFromScore(sig.score)})`); continue; }
+
+            const r = await adapter.placeBuyOrder(sig.symbol, qty, 0); // 시장가
+            await sb.from('bnf_live_trades').insert({
+              user_id: uid, broker: raw.broker, mode: raw.mode, symbol: sig.symbol, name: sig.name,
+              strategy_code: mod.code, side: 'BUY', trigger_note: plan.note,
+              order_type: 'market', order_price: lastRow.close, qty,
+              order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
             });
-            await notify(`🟢 <b>[자동매매·${modeTag}] 매수 주문</b>\n${sig.name} ${qty}주 (시장가 ~${Math.round(lastRow.close).toLocaleString('ko-KR')}원)\n전략: ${mod.name.split('·')[0].trim()}\n${plan.note}`);
-            cash -= qty * lastRow.close;
-            slots--; buys++;
+            await log(r.ok ? 'info' : 'error', '매수 트리거',
+              `${sig.name} ${qty}주 @~${Math.round(lastRow.close).toLocaleString('ko-KR')} · 점수 ${sig.score}(★${starsFromScore(sig.score)}) · ${plan.note} → ${r.ok ? `접수 ${r.orderNo}` : `실패: ${r.message}`}`);
+            if (r.ok) {
+              await sb.from('bnf_live_positions').insert({
+                user_id: uid, broker: raw.broker, symbol: sig.symbol, name: sig.name,
+                strategy_code: mod.code, entry_price: lastRow.close, shares: qty,
+                sl: plan.sl, tp1_hit: false, order_no: r.orderNo ?? '',
+              });
+              await notify(`🟢 <b>[자동매매·${modeTag}] 매수 주문</b>\n${sig.name} ${qty}주 (시장가 ~${Math.round(lastRow.close).toLocaleString('ko-KR')}원)\n전략: ${mod.name.split('·')[0].trim()} (점수 ${sig.score}·★${starsFromScore(sig.score)})\n${plan.note}`);
+              cash -= qty * lastRow.close;
+              heldSymbols.add(toKrCode(sig.symbol));
+              slots--; buys++;
+            }
           }
         }
       }

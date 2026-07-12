@@ -57,7 +57,7 @@ export default function ChartPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">차트 분석 — {stockName(symbol)}</h1>
+          <h1 className="text-2xl font-bold text-ink">차트 분석 — {stockName(symbol)}</h1>
           <p className="text-sm text-slate-400 mt-1">{mod.name}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -88,7 +88,7 @@ export default function ChartPage() {
       <div className="grid grid-cols-2 md:grid-cols-6 gap-3">
         <div className="card !p-3">
           <div className="text-xs text-slate-400">종가</div>
-          <div className="font-bold text-white">{fmt(last?.close)}</div>
+          <div className="font-bold text-ink">{fmt(last?.close)}</div>
         </div>
         {mod.lineStyles.slice(0, 4).map((ls) => (
           <div key={ls.key} className="card !p-3">
@@ -124,7 +124,7 @@ export default function ChartPage() {
       {analysis && (
         <div className="card space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
-            <h3 className="font-bold text-white">📐 전략 엔진 분석 — {mod.name}</h3>
+            <h3 className="font-bold text-ink">📐 전략 엔진 분석 — {mod.name}</h3>
             <span className={`badge ${
               analysis.status === 'BUY' ? 'bg-up/20 text-up'
               : analysis.status === 'SELL' ? 'bg-amber-500/20 text-amber-400'
@@ -151,9 +151,9 @@ export default function ChartPage() {
                   </tr>
                 ))}
                 <tr>
-                  <td className="td font-bold text-white">합계</td>
+                  <td className="td font-bold text-ink">합계</td>
                   <td className="td" />
-                  <td className="td font-bold text-white">{analysis.scan.score}점</td>
+                  <td className="td font-bold text-ink">{analysis.scan.score}점</td>
                 </tr>
               </tbody>
             </table>

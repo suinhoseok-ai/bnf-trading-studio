@@ -177,8 +177,10 @@ export async function fetchCandles(
     if (candles.length < 30) throw new Error('insufficient data');
     cache.set(key, { at: Date.now(), data: candles });
     return { candles, demo: false };
-  } catch {
+  } catch (e) {
     // ── 데모 모드: 결정론적 합성 데이터 (심볼 기반 시드 → 항상 동일한 차트) ──
+    // 실패 사유를 콘솔에 남겨 실시세 조회 실패 원인(네트워크 차단/레이트리밋 등)을 진단할 수 있게 함.
+    console.warn(`[marketData] ${symbol} 실시세 조회 실패 → 데모 데이터로 대체:`, e instanceof Error ? e.message : e);
     const candles = generateSynthetic(symbol, interval, range);
     return { candles, demo: true };
   }

@@ -1,8 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { supabase } from '../lib/supabase';
 import { UNIVERSE_OPTIONS } from '../lib/marketData';
-import StrategyPicker from '../components/StrategyPicker';
+import { ALL_STRATEGIES } from '../lib/strategies';
+
+interface StrategyBudget {
+  strategyCode: string;
+  budget: number;
+  enabled: boolean;
+}
 
 interface TradeSettings {
   broker: 'kis' | 'toss';
@@ -13,35 +20,30 @@ interface TradeSettings {
   appSecretSet?: boolean;
   enabled?: boolean;
   status?: string;
-  strategyCode: string;
   universe: string;
   intervalMin: number;
   maxPositions: number;
-  budgetPct: number;
   lastRunAt?: string | null;
   lastError?: string;
 }
 interface Account { totalAsset: number; cash: number; evalAmount: number; pnl: number; pnlPct: number; positionCount: number }
 interface BrokerPos { symbol: string; name: string; qty: number; sellableQty: number; avgPrice: number; curPrice: number; evalAmount: number; pnl: number; pnlPct: number }
-interface LiveTrade { id: number; symbol: string; name: string; strategy_code: string; side: string; trigger_note: string; order_type: string; order_price: number; qty: number; pnl: number; order_no: string; status: string; executed_at: string; mode: string }
-interface TradeLog { id: number; level: string; event: string; detail: string; created_at: string }
 
 const DEFAULT_SETTINGS: TradeSettings = {
   broker: 'kis', mode: 'paper', accountNo: '', accountProductCd: '01',
-  strategyCode: 'bnf1', universe: 'KOSPI', intervalMin: 10, maxPositions: 5, budgetPct: 10,
-};
-
-const sideLabel: Record<string, { text: string; cls: string }> = {
-  BUY: { text: '매수', cls: 'bg-up/20 text-up' },
-  SELL_TP1: { text: '1차익절', cls: 'bg-profit/20 text-profit' },
-  SELL_TP2: { text: '익절', cls: 'bg-profit/20 text-profit' },
-  SELL_SL: { text: '손절/청산', cls: 'bg-amber-500/20 text-amber-400' },
-  FORCE_SELL: { text: '강제매도', cls: 'bg-red-500/20 text-red-400' },
+  universe: 'KOSPI', intervalMin: 10, maxPositions: 5,
 };
 
 export default function TradingPage() {
-  const { profile, guestMode } = useAuth();
+  const { guestMode, allowedStrategyCodes } = useAuth();
   const [settings, setSettings] = useState<TradeSettings>(DEFAULT_SETTINGS);
+  const allowedStrategies = ALL_STRATEGIES.filter((m) => allowedStrategyCodes.includes(m.code));
+  const [strategies, setStrategies] = useState<StrategyBudget[]>(
+    allowedStrategies.map((m) => ({ strategyCode: m.code, budget: 0, enabled: false })),
+  );
+  const setStratField = (code: string, patch: Partial<StrategyBudget>) =>
+    setStrategies((prev) => prev.map((s) => (s.strategyCode === code ? { ...s, ...patch } : s)));
+  const totalBudget = strategies.filter((s) => s.enabled).reduce((sum, s) => sum + (Number(s.budget) || 0), 0);
   const [appKey, setAppKey] = useState('');
   const [appSecret, setAppSecret] = useState('');
   const [encryption, setEncryption] = useState<boolean | null>(null);
@@ -51,8 +53,6 @@ export default function TradingPage() {
   const [keyMasked, setKeyMasked] = useState('');
   const [account, setAccount] = useState<Account | null>(null);
   const [positions, setPositions] = useState<BrokerPos[]>([]);
-  const [trades, setTrades] = useState<LiveTrade[]>([]);
-  const [logs, setLogs] = useState<TradeLog[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
 
@@ -81,9 +81,10 @@ export default function TradingPage() {
         const s = j.settings;
         setSettings({
           broker: s.broker, mode: s.mode, accountNo: s.accountNo, accountProductCd: s.accountProductCd,
-          strategyCode: s.strategyCode, universe: s.universe, intervalMin: s.intervalMin,
-          maxPositions: s.maxPositions, budgetPct: Number(s.budgetPct),
+          universe: s.universe, intervalMin: s.intervalMin, maxPositions: s.maxPositions,
         });
+        const saved = new Map<string, StrategyBudget>((s.strategies ?? []).map((st: StrategyBudget) => [st.strategyCode, st]));
+        setStrategies(allowedStrategies.map((m) => saved.get(m.code) ?? { strategyCode: m.code, budget: 0, enabled: false }));
         setStatus(s.status ?? 'STOPPED');
         setLastRunAt(s.lastRunAt ?? null);
         setLastError(s.lastError ?? '');
@@ -92,15 +93,7 @@ export default function TradingPage() {
     } catch { /* 함수 미배포(로컬) 등 — 화면은 유지 */ }
   }, [api]);
 
-  const loadHistory = useCallback(async () => {
-    if (guestMode || !profile) return;
-    const { data: t } = await supabase.from('bnf_live_trades').select('*').eq('user_id', profile.id).order('executed_at', { ascending: false }).limit(50);
-    setTrades((t as unknown as LiveTrade[]) ?? []);
-    const { data: l } = await supabase.from('bnf_trade_logs').select('*').eq('user_id', profile.id).order('created_at', { ascending: false }).limit(100);
-    setLogs((l as unknown as TradeLog[]) ?? []);
-  }, [guestMode, profile]);
-
-  useEffect(() => { if (!guestMode) { loadSettings(); loadHistory(); } }, [guestMode, loadSettings, loadHistory]);
+  useEffect(() => { if (!guestMode) { loadSettings(); } }, [guestMode, loadSettings]);
 
   const run = async (label: string, fn: () => Promise<void>) => {
     setBusy(label);
@@ -109,7 +102,10 @@ export default function TradingPage() {
   };
 
   const saveSettings = () => run('save', async () => {
-    await api('save-settings', { settings: { ...settings, appKey: appKey.trim() || undefined, appSecret: appSecret.trim() || undefined } });
+    await api('save-settings', {
+      settings: { ...settings, appKey: appKey.trim() || undefined, appSecret: appSecret.trim() || undefined },
+      strategies,
+    });
     setAppKey(''); setAppSecret('');
     flash(true, '설정을 저장했습니다.');
     await loadSettings();
@@ -125,7 +121,6 @@ export default function TradingPage() {
     const [a, p] = await Promise.all([api('account'), api('positions')]);
     setAccount(a.account);
     setPositions(p.positions);
-    await loadHistory();
   });
 
   const toggle = (running: boolean) => run('toggle', async () => {
@@ -148,25 +143,12 @@ export default function TradingPage() {
     await refreshBroker();
   });
 
-  const downloadCsv = () => {
-    const head = 'id,일시,모드,종목,구분,수량,주문가,손익,트리거,주문번호,상태\n';
-    const rows = trades.map((t) =>
-      [t.id, t.executed_at, t.mode, t.name || t.symbol, t.side, t.qty, t.order_price, t.pnl, `"${(t.trigger_note ?? '').replace(/"/g, '""')}"`, t.order_no, t.status].join(','),
-    ).join('\n');
-    const blob = new Blob(['﻿' + head + rows], { type: 'text/csv;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `auto_trades_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
-
   const fmt = (n: number) => Math.round(n).toLocaleString('ko-KR');
 
   if (guestMode) {
     return (
       <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-white">자동매매</h1>
+        <h1 className="text-2xl font-bold text-ink">자동매매</h1>
         <div className="card text-sm text-amber-300 bg-amber-500/10 border-amber-500/40">
           자동매매는 로그인(Supabase 설정) 상태에서만 사용할 수 있습니다. 게스트 데모 모드에서는 모의투자(시뮬레이션)를 이용하세요.
         </div>
@@ -183,7 +165,7 @@ export default function TradingPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">자동매매 (실거래)</h1>
+          <h1 className="text-2xl font-bold text-ink">자동매매 (실거래)</h1>
           <p className="text-sm text-slate-400 mt-1">
             전략 트리거로만 주문하는 무인 자동매매 — 브라우저를 꺼도 장중 {settings.intervalMin}분 주기로 서버에서 실행됩니다. AI 미사용.
           </p>
@@ -211,7 +193,7 @@ export default function TradingPage() {
       <div className="grid xl:grid-cols-2 gap-4 items-start">
         {/* ── 브로커 설정 ── */}
         <div className="card space-y-3">
-          <h2 className="font-bold text-white">🔌 증권사 연결 설정</h2>
+          <h2 className="font-bold text-ink">🔌 증권사 연결 설정</h2>
           <div className="grid md:grid-cols-2 gap-3">
             <div>
               <label className="text-xs text-slate-400 block mb-1">증권사</label>
@@ -255,12 +237,8 @@ export default function TradingPage() {
 
         {/* ── 자동매매 전략 설정 ── */}
         <div className="card space-y-3">
-          <h2 className="font-bold text-white">⚙️ 자동매매 규칙</h2>
+          <h2 className="font-bold text-ink">⚙️ 자동매매 규칙</h2>
           <div className="grid md:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">매매 전략</label>
-              <StrategyPicker value={settings.strategyCode} onChange={(c) => setF('strategyCode', c)} className="input w-full" />
-            </div>
             <div>
               <label className="text-xs text-slate-400 block mb-1">매수 스캔 대상</label>
               <select className="input w-full" value={settings.universe} onChange={(e) => setF('universe', e.target.value)}>
@@ -272,17 +250,43 @@ export default function TradingPage() {
               <input className="input w-full" type="number" min={10} step={5} value={settings.intervalMin} onChange={(e) => setF('intervalMin', Math.max(10, Number(e.target.value)))} />
             </div>
             <div>
-              <label className="text-xs text-slate-400 block mb-1">최대 보유 종목 수</label>
+              <label className="text-xs text-slate-400 block mb-1">최대 보유 종목 수 (전체 전략 합산)</label>
               <input className="input w-full" type="number" min={1} max={20} value={settings.maxPositions} onChange={(e) => setF('maxPositions', Number(e.target.value))} />
             </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">1회 매수 비중 (예수금 대비 %)</label>
-              <input className="input w-full" type="number" min={1} max={100} value={settings.budgetPct} onChange={(e) => setF('budgetPct', Number(e.target.value))} />
-            </div>
           </div>
+
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">전략별 자동매매 예산 (2개 이상 동시 실행 가능)</label>
+            <div className="space-y-2">
+              {strategies.map((s) => {
+                const mod = allowedStrategies.find((m) => m.code === s.strategyCode);
+                if (!mod) return null;
+                return (
+                  <div key={s.strategyCode} className="flex items-center gap-2 bg-base rounded-lg p-2">
+                    <input
+                      type="checkbox" checked={s.enabled}
+                      onChange={(e) => setStratField(s.strategyCode, { enabled: e.target.checked })}
+                    />
+                    <span className="text-sm text-ink flex-1 truncate" title={mod.name}>{mod.name}</span>
+                    <input
+                      className="input !w-32 text-right" type="number" min={0} step={10000}
+                      value={s.budget} disabled={!s.enabled}
+                      onChange={(e) => setStratField(s.strategyCode, { budget: Math.max(0, Number(e.target.value)) })}
+                      placeholder="예산(원)"
+                    />
+                    <span className="text-xs text-slate-500 w-4">원</span>
+                  </div>
+                );
+              })}
+              {strategies.length === 0 && <p className="text-sm text-slate-500">사용 가능한 전략이 없습니다. 관리자에게 전략 권한을 요청하세요.</p>}
+            </div>
+            <p className="text-xs text-slate-400 mt-2">총 배정 예산: <span className="text-ink font-semibold">{fmt(totalBudget)}원</span></p>
+          </div>
+
           <p className="text-xs text-slate-500 leading-relaxed">
             장중(평일 09:00~15:30) 서버 스케줄러가 설정 주기마다: ① 보유 포지션의 전략 매도 트리거 검사 → 시장가 매도,
-            ② 유니버스 매수 트리거 검사 → 예수금×비중만큼 시장가 매수. 체결 시 텔레그램으로 알립니다(설정 페이지 연동 필요).
+            ② 전략별로 유니버스 매수 트리거 검사 → 전략 예산(보유 중인 금액 차감한 잔여분)을 매수신호 종목들의 점수(추천도) 비중으로 배분해 시장가 매수.
+            체결 시 텔레그램으로 알립니다(설정 페이지 연동 필요).
           </p>
         </div>
       </div>
@@ -290,18 +294,18 @@ export default function TradingPage() {
       {/* ── 계좌 현황 ── */}
       <div className="card space-y-3">
         <div className="flex items-center justify-between">
-          <h2 className="font-bold text-white">💳 계좌 현황 (거래소 실시간)</h2>
+          <h2 className="font-bold text-ink">💳 계좌 현황 (거래소 실시간)</h2>
           <button className="btn-ghost !py-1 !px-3 text-sm" onClick={refreshBroker} disabled={busy !== null}>
             {busy === 'refresh' ? '조회 중...' : '🔄 새로고침'}
           </button>
         </div>
         {account ? (
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">총평가자산</div><div className="text-lg font-bold text-white">{fmt(account.totalAsset)}원</div></div>
-            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">예수금</div><div className="text-lg font-bold text-white">{fmt(account.cash)}원</div></div>
-            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">주식 평가금액</div><div className="text-lg font-bold text-white">{fmt(account.evalAmount)}원</div></div>
+            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">총평가자산</div><div className="text-lg font-bold text-ink">{fmt(account.totalAsset)}원</div></div>
+            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">예수금</div><div className="text-lg font-bold text-ink">{fmt(account.cash)}원</div></div>
+            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">주식 평가금액</div><div className="text-lg font-bold text-ink">{fmt(account.evalAmount)}원</div></div>
             <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">평가손익</div><div className={`text-lg font-bold ${account.pnl >= 0 ? 'text-up' : 'text-down'}`}>{fmt(account.pnl)}원 ({account.pnlPct.toFixed(2)}%)</div></div>
-            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">보유종목수</div><div className="text-lg font-bold text-white">{account.positionCount}종목</div></div>
+            <div className="card !p-3 !bg-base"><div className="text-xs text-slate-400">보유종목수</div><div className="text-lg font-bold text-ink">{account.positionCount}종목</div></div>
           </div>
         ) : (
           <p className="text-sm text-slate-500">[새로고침]을 눌러 거래소 계좌를 조회하세요. (설정 저장 + 연결 테스트 선행)</p>
@@ -310,7 +314,7 @@ export default function TradingPage() {
 
       {/* ── 보유 포지션 + 강제매도 ── */}
       <div className="card overflow-x-auto">
-        <h2 className="font-bold text-white mb-2">📦 거래소 보유 포지션</h2>
+        <h2 className="font-bold text-ink mb-2">📦 거래소 보유 포지션</h2>
         <table className="w-full whitespace-nowrap">
           <thead>
             <tr className="border-b border-edge">
@@ -322,7 +326,7 @@ export default function TradingPage() {
             {positions.length === 0 && <tr><td colSpan={8} className="td text-center text-slate-500 py-8">보유 포지션이 없거나 아직 조회하지 않았습니다.</td></tr>}
             {positions.map((p) => (
               <tr key={p.symbol} className="border-b border-edge/50">
-                <td className="td font-medium text-white">{p.name} <span className="text-xs text-slate-500">{p.symbol}</span></td>
+                <td className="td font-medium text-ink">{p.name} <span className="text-xs text-slate-500">{p.symbol}</span></td>
                 <td className="td">{p.qty}주</td>
                 <td className="td">{fmt(p.avgPrice)}</td>
                 <td className="td">{fmt(p.curPrice)}</td>
@@ -340,54 +344,14 @@ export default function TradingPage() {
         </table>
       </div>
 
-      {/* ── 자동매매 거래 이력 ── */}
-      <div className="card overflow-x-auto">
-        <div className="flex items-center justify-between mb-2">
-          <h2 className="font-bold text-white">📜 자동매매 거래 이력 (최근 50건)</h2>
-          <button className="btn-ghost !py-1 !px-3 text-sm" onClick={downloadCsv} disabled={trades.length === 0}>CSV 다운로드</button>
+      {/* ── 거래이력·로그 바로가기 ── */}
+      <Link to="/trading/history" className="card flex items-center justify-between hover:border-accent transition-colors">
+        <div>
+          <h2 className="font-bold text-ink">📜 거래이력 · 로그</h2>
+          <p className="text-sm text-slate-400 mt-1">자동매매 대시보드 · 거래 이력 · 실행 로그를 기간별로 조회합니다.</p>
         </div>
-        <table className="w-full whitespace-nowrap">
-          <thead>
-            <tr className="border-b border-edge">
-              <th className="th">일시</th><th className="th">모드</th><th className="th">종목</th><th className="th">구분</th>
-              <th className="th">수량</th><th className="th">주문가</th><th className="th">추정손익</th><th className="th">트리거</th><th className="th">상태</th>
-            </tr>
-          </thead>
-          <tbody>
-            {trades.length === 0 && <tr><td colSpan={9} className="td text-center text-slate-500 py-8">자동매매 거래 이력이 없습니다.</td></tr>}
-            {trades.map((t) => (
-              <tr key={t.id} className="border-b border-edge/50">
-                <td className="td text-slate-400">{new Date(t.executed_at).toLocaleString('ko-KR')}</td>
-                <td className="td"><span className={`badge ${t.mode === 'real' ? 'bg-red-500/20 text-red-400' : 'bg-edge text-slate-400'}`}>{t.mode === 'real' ? '실전' : '모의'}</span></td>
-                <td className="td text-white">{t.name || t.symbol}</td>
-                <td className="td"><span className={`badge ${sideLabel[t.side]?.cls ?? 'bg-edge text-slate-300'}`}>{sideLabel[t.side]?.text ?? t.side}</span></td>
-                <td className="td">{t.qty}주</td>
-                <td className="td">{fmt(Number(t.order_price))}</td>
-                <td className={`td font-bold ${Number(t.pnl) > 0 ? 'text-up' : Number(t.pnl) < 0 ? 'text-down' : 'text-slate-400'}`}>{fmt(Number(t.pnl))}원</td>
-                <td className="td text-slate-400 max-w-[280px] truncate" title={t.trigger_note}>{t.trigger_note}</td>
-                <td className="td">{t.status === 'SUBMITTED' ? <span className="text-profit">접수</span> : <span className="text-red-400">실패</span>}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      {/* ── 자동매매 로그 ── */}
-      <div className="card">
-        <h2 className="font-bold text-white mb-2">🧾 자동매매 로그 (최근 100건)</h2>
-        <div className="max-h-72 overflow-y-auto space-y-1 text-sm">
-          {logs.length === 0 && <div className="text-slate-500 py-4 text-center">로그가 없습니다.</div>}
-          {logs.map((l) => (
-            <div key={l.id} className={`px-3 py-1.5 rounded flex gap-3 ${
-              l.level === 'error' ? 'bg-red-500/10 text-red-300' : l.level === 'warn' ? 'bg-amber-500/10 text-amber-300' : 'bg-edge/40 text-slate-300'
-            }`}>
-              <span className="text-slate-500 shrink-0">{new Date(l.created_at).toLocaleString('ko-KR')}</span>
-              <span className="font-semibold shrink-0">{l.event}</span>
-              <span className="truncate" title={l.detail}>{l.detail}</span>
-            </div>
-          ))}
-        </div>
-      </div>
+        <span className="text-accent">보러가기 →</span>
+      </Link>
 
       <div className="card text-xs text-slate-500 leading-relaxed">
         <div className="font-bold text-slate-400 mb-1">유의사항</div>

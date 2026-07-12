@@ -220,6 +220,18 @@ create table if not exists public.bnf_trading_settings (
   updated_at timestamptz not null default now()
 );
 
+-- 사용자별 자동매매 전략 예산 (다중 전략 동시 실행 — 전략별 원화 절대금액 한도)
+create table if not exists public.bnf_trading_strategies (
+  id bigserial primary key,
+  user_id uuid not null references public.bnf_profiles(id) on delete cascade,
+  strategy_code text not null,
+  budget numeric not null default 0,      -- 전략별 총 투자한도 (원화 절대금액)
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, strategy_code)
+);
+
 -- 자동매매 전략 포지션 상태 (전략 청산 로직용 — 실계좌 잔고와 별개로 sl/tp1 상태 추적)
 create table if not exists public.bnf_live_positions (
   id bigserial primary key,
@@ -292,6 +304,7 @@ alter table public.bnf_paper_trades enable row level security;
 alter table public.bnf_backtest_results enable row level security;
 alter table public.bnf_user_positions enable row level security;
 alter table public.bnf_trading_settings enable row level security;
+alter table public.bnf_trading_strategies enable row level security;
 alter table public.bnf_live_positions enable row level security;
 alter table public.bnf_live_trades enable row level security;
 alter table public.bnf_trade_logs enable row level security;
@@ -348,6 +361,10 @@ create policy "user_positions_own" on public.bnf_user_positions
 
 drop policy if exists "trading_settings_own" on public.bnf_trading_settings;
 create policy "trading_settings_own" on public.bnf_trading_settings
+  for all using (user_id = auth.uid() or public.is_admin());
+
+drop policy if exists "trading_strategies_own" on public.bnf_trading_strategies;
+create policy "trading_strategies_own" on public.bnf_trading_strategies
   for all using (user_id = auth.uid() or public.is_admin());
 
 drop policy if exists "live_positions_own" on public.bnf_live_positions;

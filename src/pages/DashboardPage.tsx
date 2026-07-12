@@ -110,7 +110,7 @@ export default function DashboardPage() {
     <div className="space-y-6">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">대시보드</h1>
+          <h1 className="text-2xl font-bold text-ink">대시보드</h1>
           <p className="text-sm text-slate-400 mt-1">{mod.name}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -128,8 +128,8 @@ export default function DashboardPage() {
       {editStocks && (
         <div className="card space-y-3">
           <div className="flex items-center justify-between">
-            <h3 className="font-bold text-white text-sm">대시보드 표시 종목 ({dashSymbols.length}/{MAX_DASH})</h3>
-            <button className="text-slate-500 hover:text-white text-sm" onClick={() => setEditStocks(false)}>✕ 닫기</button>
+            <h3 className="font-bold text-ink text-sm">대시보드 표시 종목 ({dashSymbols.length}/{MAX_DASH})</h3>
+            <button className="text-slate-500 hover:text-ink text-sm" onClick={() => setEditStocks(false)}>✕ 닫기</button>
           </div>
           <div className="flex flex-wrap gap-2">
             {dashSymbols.map((sym) => (
@@ -168,7 +168,7 @@ export default function DashboardPage() {
         {indices.map((ix) => (
           <div key={ix.label} className="card">
             <div className="text-xs text-slate-400">{ix.label}</div>
-            <div className="text-xl font-bold text-white mt-1">{ix.price.toLocaleString('ko-KR', { maximumFractionDigits: 2 })}</div>
+            <div className="text-xl font-bold text-ink mt-1">{ix.price.toLocaleString('ko-KR', { maximumFractionDigits: 2 })}</div>
             <div className={`text-sm mt-0.5 ${ix.changePct >= 0 ? 'text-up' : 'text-down'}`}>
               {ix.changePct >= 0 ? '▲' : '▼'} {Math.abs(ix.changePct).toFixed(2)}%
             </div>
@@ -179,7 +179,7 @@ export default function DashboardPage() {
           return (
             <div key={sym} className="card">
               <div className="text-xs text-slate-400 truncate">{stockName(sym)}</div>
-              <div className="text-xl font-bold text-white mt-1">{q ? q.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 }) : '…'}</div>
+              <div className="text-xl font-bold text-ink mt-1">{q ? q.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 }) : '…'}</div>
               <div className={`text-sm mt-0.5 ${(q?.changePct ?? 0) >= 0 ? 'text-up' : 'text-down'}`}>
                 {q ? `${q.changePct >= 0 ? '▲' : '▼'} ${Math.abs(q.changePct).toFixed(2)}%` : '-'}
               </div>
@@ -188,7 +188,7 @@ export default function DashboardPage() {
         })}
         <div className="card">
           <div className="text-xs text-slate-400">모의투자 가용현금</div>
-          <div className="text-xl font-bold text-white mt-1">
+          <div className="text-xl font-bold text-ink mt-1">
             {account ? `${fmt(account.cash)}원` : guestMode ? '게스트 모드' : '계좌 미개설'}
           </div>
           <div className="text-sm text-slate-400 mt-0.5">
@@ -197,7 +197,7 @@ export default function DashboardPage() {
         </div>
         <div className="card">
           <div className="text-xs text-slate-400">활성 전략</div>
-          <div className="text-xl font-bold text-white mt-1">{mod.name.split('·')[0].trim()}</div>
+          <div className="text-xl font-bold text-ink mt-1">{mod.name.split('·')[0].trim()}</div>
           <div className={`text-sm mt-0.5 ${enabled ? 'text-profit' : 'text-red-400'}`}>
             {enabled ? '● 사용 가능' : '● 사용 불가'}
           </div>
@@ -207,7 +207,7 @@ export default function DashboardPage() {
       {/* 오늘 신호 */}
       <div className="card">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-bold text-white">오늘 신호 · 추천 상위</h2>
+          <h2 className="font-bold text-ink">오늘 신호 · 추천 상위</h2>
           <Link to="/scanner" className="text-sm text-accent hover:underline">전체 스캔 →</Link>
         </div>
         {scanning ? (
@@ -230,7 +230,7 @@ export default function DashboardPage() {
               <tbody>
                 {signals.map((s) => (
                   <tr key={s.symbol} className="border-b border-edge/50 hover:bg-edge/30">
-                    <td className="td font-medium text-white">
+                    <td className="td font-medium text-ink">
                       <Link to={`/chart?symbol=${s.symbol}&strat=${stratCode}`} className="hover:text-accent">{s.name}</Link>
                     </td>
                     <td className="td">{fmt(s.price)}</td>
@@ -238,7 +238,7 @@ export default function DashboardPage() {
                     {s.cols.map((c, i) => <td key={i} className={`td ${toneCls(c.tone)}`}>{c.value}</td>)}
                     <td className="td">{s.buy ? <span className="badge bg-up/20 text-up">매수</span> : <span className="text-slate-500">-</span>}</td>
                     <td className="td">{s.exit ? <span className="badge bg-amber-500/20 text-amber-400">매도</span> : <span className="text-slate-500">-</span>}</td>
-                    <td className="td font-bold text-white">{s.score}</td>
+                    <td className="td font-bold text-ink">{s.score}</td>
                     <td className="td"><Stars n={s.stars} /></td>
                   </tr>
                 ))}
@@ -250,7 +250,7 @@ export default function DashboardPage() {
 
       {/* 전략 규칙 요약 */}
       <div className="card">
-        <h2 className="font-bold text-white mb-3">{mod.name} 매매 규칙 요약</h2>
+        <h2 className="font-bold text-ink mb-3">{mod.name} 매매 규칙 요약</h2>
         <div className="grid md:grid-cols-4 gap-3 text-sm">
           {mod.rules.map((r) => (
             <div key={r.tag} className="bg-base rounded-lg p-3 border border-edge">

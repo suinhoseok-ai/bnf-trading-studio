@@ -207,13 +207,16 @@ node verify.tmp.cjs; rm -f verify.tmp.ts verify.tmp.cjs
 ### 6.2 무인 실행 엔진 `trader.mts` (예약함수 `*/10 * * * *`)
 브라우저 불필요. 장중(`isKoreanMarketOpen`)에만. `bnf_trading_settings`에서 `enabled=true & status='RUNNING'` 사용자 순회:
 1. Broker connect (토큰 캐시)
-2. **매도**: `bnf_live_positions`(OPEN) → 전략 `stepOpen` 트리거 → 시장가 매도 (거래소 매도가능수량 범위 내)
-3. **매수**: 유니버스(상한 25종목) 스캔 → `buy` 트리거 → 예수금×`budget_pct` 시장가 매수 (회당 최대 3건, `max_positions` 슬롯 내)
+2. **매도**: `bnf_live_positions`(OPEN) → 각 포지션의 `strategy_code`로 전략 모듈 조회 → `stepOpen` 트리거 → 시장가 매도 (거래소 매도가능수량 범위 내). 다중 전략 포지션이 섞여 있어도 각자 자기 전략으로 청산됨.
+3. **매수 (다중 전략 · 점수가중 배분)**: `bnf_trading_strategies`에서 사용자의 `enabled=true & budget>0` 전략 목록을 순회. 전략별로:
+   - 잔여예산 = `strategy.budget − Σ(entry_price×shares)` (해당 전략의 현재 OPEN 포지션 투입액)
+   - 유니버스(상한 25종목) 스캔 → `buy` 트리거 종목들을 `scan()` 점수(0~100)와 함께 수집
+   - 같은 회차에 잡힌 신호가 여럿이면 잔여예산을 **점수 비중으로 분배**(`alloc = 잔여예산 × score/Σscore`, 실제 계좌현금 상한 적용) 후 각각 시장가 매수 (회당 전체 최대 5건, `max_positions` 슬롯은 전략 공통)
 4. `bnf_live_trades`(거래이력) + `bnf_trade_logs`(로그) 저장, 텔레그램 알림
 5. 오류 시 status='ERROR' + last_error 저장 + 텔레그램 경고
 
 ### 6.3 웹 API `broker.mts` (`POST /api/broker`, accessToken 검증)
-actions: `save-settings`(키 암호화 저장) / `get-settings`(키 마스킹) / `test`(연결+계좌) / `account` / `positions` / `orders` / `force-sell`(강제매도) / `toggle`(시작·중지). UI = `TradingPage.tsx`.
+actions: `save-settings`(키 암호화 저장 + `strategies` 배열을 `bnf_trading_strategies`에 재기록) / `get-settings`(키 마스킹, `strategies` 목록 포함) / `test`(연결+계좌) / `account` / `positions` / `orders` / `force-sell`(강제매도) / `toggle`(시작·중지 — 활성 전략·예산이 하나도 없으면 시작 거부). UI = `TradingPage.tsx`(전략별 예산 입력 테이블).
 
 ---
 
@@ -254,8 +257,9 @@ RLS 전부 활성. 대부분 `user_id = auth.uid() or is_admin()` 정책. 최초
 | `bnf_paper_accounts` / `bnf_paper_positions` | 모의투자 계좌·포지션 |
 | `bnf_user_positions` | 수동 등록 포지션 (`/positions`) |
 | `bnf_admin_config` | 전역 리포트 설정 (단일 행 id=1, config jsonb) |
-| `bnf_trading_settings` | ★ 자동매매 설정 (broker, mode, 암호화된 키, status, 전략, 예산...) |
-| `bnf_live_positions` | ★ 자동매매 전략 포지션 상태 (sl/tp1 추적) |
+| `bnf_trading_settings` | ★ 자동매매 계좌 설정 (broker, mode, 암호화된 키, status, universe, interval, max_positions). `strategy_code`/`budget_pct` 컬럼은 레거시(더 이상 사용 안 함) |
+| `bnf_trading_strategies` | ★ 사용자별 전략별 예산 (strategy_code, budget=원화 절대금액, enabled) — 2개 이상 동시 실행 가능 |
+| `bnf_live_positions` | ★ 자동매매 전략 포지션 상태 (sl/tp1 추적, strategy_code로 각자 전략 귀속) |
 | `bnf_live_trades` | ★ 자동매매 거래이력 (삭제 안 함, CSV 다운로드) |
 | `bnf_trade_logs` | ★ 자동매매 로그 (트리거/주문/응답/오류) |
 
@@ -305,6 +309,7 @@ RLS 전부 활성. 대부분 `user_id = auth.uid() or is_admin()` 정책. 최초
 
 ### 알려진 제약/주의
 - Yahoo 시세는 전체 종목 열거 불가 → `marketData.ts`의 curated 대형주 목록으로 유니버스 구성.
+- 실시세 조회(`query1.finance.yahoo.com`) 실패 시 `query2.finance.yahoo.com`으로 1회 자동 재시도(`yahoo.mts`, `trader.mts`) 후에도 실패하면 합성(데모) 데이터로 폴백함. 폴백 발생 시 원인은 브라우저 콘솔(`[marketData] ... 실시세 조회 실패`)과 Netlify 함수 로그(`[yahoo proxy] ...`)에서 확인 가능 — 대개 Yahoo 측 일시 레이트리밋/차단이 원인이며 완전 근절은 불가.
 - 게스트 데모 모드의 합성 데이터는 봉주기별로 값이 달라 카드 vs 신호표 가격이 다르게 보일 수 있음(실배포 실데이터에선 일치).
 - 토스증권 자동매매 불가(공개 API 미제공) — KIS만 실동작.
 - 자동매매 실전 모드는 실제 자금 손실 위험. 모의투자 모드 우선 검증 필수.

@@ -122,7 +122,7 @@ export default function PositionsPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-2">
         <div>
-          <h1 className="text-2xl font-bold text-white">내 포지션</h1>
+          <h1 className="text-2xl font-bold text-ink">내 포지션</h1>
           <p className="text-sm text-slate-400 mt-1">
             실제 매수한 종목을 전략과 함께 등록하면, 해당 전략의 매도 시그널 발생 시 텔레그램으로 알려드립니다 (설정 페이지에서 텔레그램 연동 필요).
           </p>
@@ -132,7 +132,7 @@ export default function PositionsPage() {
 
       {/* 등록 폼 */}
       <div className="card">
-        <h3 className="font-bold text-white mb-3">포지션 등록</h3>
+        <h3 className="font-bold text-ink mb-3">포지션 등록</h3>
         <div className="flex flex-wrap items-end gap-3">
           <div>
             <label className="text-xs text-slate-400 block mb-1">종목</label>
@@ -165,7 +165,7 @@ export default function PositionsPage() {
       {/* 목록 */}
       <div className="card overflow-x-auto">
         <div className="flex items-center justify-between mb-2">
-          <h3 className="font-bold text-white">보유 포지션 ({positions.length})</h3>
+          <h3 className="font-bold text-ink">보유 포지션 ({positions.length})</h3>
           <button className="btn-ghost !py-1 !px-3 text-sm" onClick={() => refreshStatus(positions)} disabled={checking || positions.length === 0}>
             {checking ? '확인 중...' : '🔄 시그널 확인'}
           </button>
@@ -189,7 +189,7 @@ export default function PositionsPage() {
               const sig = signals[p.id];
               return (
                 <tr key={p.id} className="border-b border-edge/50">
-                  <td className="td font-medium text-white">
+                  <td className="td font-medium text-ink">
                     <Link to={`/chart?symbol=${p.symbol}&strat=${p.strategy_code}`} className="hover:text-accent">{p.name || stockName(p.symbol)}</Link>
                   </td>
                   <td className="td text-slate-400 text-xs">{getStrategy(p.strategy_code).name.split('·')[0].trim()}</td>

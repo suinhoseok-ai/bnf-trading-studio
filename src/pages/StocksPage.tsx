@@ -75,7 +75,7 @@ export default function StocksPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">전체 종목</h1>
+          <h1 className="text-2xl font-bold text-ink">전체 종목</h1>
           <p className="text-sm text-slate-400 mt-1">시총 상위 {ALL_STOCKS.length}개 종목 · 종목명을 클릭하면 차트, ☆로 관심종목 등록</p>
         </div>
         <input
@@ -111,11 +111,11 @@ export default function StocksPage() {
                       {watchlist.some((w) => w.symbol === s.symbol) ? '⭐' : '☆'}
                     </button>
                   </td>
-                  <td className="td font-medium text-white">
+                  <td className="td font-medium text-ink">
                     <Link to={`/chart?symbol=${s.symbol}`} className="hover:text-accent">{s.name}</Link>
                     <span className="text-xs text-slate-500 ml-1">{s.market}</span>
                   </td>
-                  <td className="td text-white">{fmt(q?.price)}</td>
+                  <td className="td text-ink">{fmt(q?.price)}</td>
                   <td className={`td ${up ? 'text-up' : 'text-down'}`}>{q ? `${q.changePct.toFixed(2)}%` : '-'}</td>
                   <td className="td text-slate-400">{fmt(q?.prevClose)}</td>
                   <td className="td text-slate-400">{fmt(q?.open)}</td>

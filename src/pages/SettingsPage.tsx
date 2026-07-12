@@ -60,7 +60,7 @@ export default function SettingsPage() {
   return (
     <div className="space-y-4">
       <header>
-        <h1 className="text-2xl font-bold text-white">설정</h1>
+        <h1 className="text-2xl font-bold text-ink">설정</h1>
         <p className="text-sm text-slate-400 mt-1">사용자별 연동 설정 — {guestMode ? '게스트: 브라우저에 저장' : '계정에 저장됩니다'}</p>
       </header>
 
@@ -68,7 +68,7 @@ export default function SettingsPage() {
 
       {/* ── Ollama ── */}
       <div className="card space-y-4">
-        <h2 className="font-bold text-white">🤖 Qwen3 (Ollama) 연결</h2>
+        <h2 className="font-bold text-ink">🤖 Qwen3 (Ollama) 연결</h2>
         <div>
           <label className="text-xs text-slate-400 block mb-1">Ollama URL</label>
           <input className="input" value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://localhost:11434" />
@@ -103,7 +103,7 @@ export default function SettingsPage() {
       {/* ── 텔레그램 알림 ── */}
       <div className="card space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="font-bold text-white">📨 텔레그램 알림 (개인 봇)</h2>
+          <h2 className="font-bold text-ink">📨 텔레그램 알림 (개인 봇)</h2>
           <label className="flex items-center gap-2 text-sm text-slate-300">
             <input type="checkbox" checked={tg.enabled} onChange={(e) => setTgField('enabled', e.target.checked)} />
             알림 켜기
@@ -189,7 +189,7 @@ export default function SettingsPage() {
 
       {/* ── 계정 정보 ── */}
       <div className="card space-y-2 text-sm text-slate-300">
-        <h2 className="font-bold text-white">계정 정보</h2>
+        <h2 className="font-bold text-ink">계정 정보</h2>
         <div className="grid grid-cols-2 gap-2 max-w-md">
           <div className="text-slate-500">이메일</div><div>{profile?.email}</div>
           <div className="text-slate-500">이름</div><div>{profile?.name || '-'}</div>

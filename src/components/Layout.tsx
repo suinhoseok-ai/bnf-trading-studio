@@ -12,6 +12,7 @@ const NAV = [
   { to: '/paper', label: '모의투자', icon: '💰' },
   { to: '/positions', label: '내 포지션', icon: '💼' },
   { to: '/trading', label: '자동매매', icon: '⚡' },
+  { to: '/trading/history', label: '매매 이력', icon: '📜' },
   { to: '/ai', label: 'AI 분석 (Qwen3)', icon: '🤖' },
   { to: '/settings', label: '설정', icon: '⚙️' },
 ];
@@ -41,7 +42,7 @@ export default function Layout({ children }: { children: ReactNode }) {
       {sidebar && (
         <aside className="w-60 shrink-0 bg-panel border-r border-edge flex flex-col">
           <div className="p-4 border-b border-edge">
-            <div className="text-lg font-bold text-white leading-tight">BNF Trading Studio</div>
+            <div className="text-lg font-bold text-ink leading-tight">BNF Trading Studio</div>
             <div className="text-xs text-accent mt-0.5">AI Edition · 볼린저밴드 수렴 회귀</div>
           </div>
           <nav className="flex-1 p-2 space-y-1 overflow-y-auto">
@@ -100,7 +101,7 @@ export default function Layout({ children }: { children: ReactNode }) {
           <button className="btn-ghost !py-1 !px-3 text-sm" onClick={toggleSidebar} title="메뉴 접기/펼치기">
             {sidebar ? '◀ 메뉴 접기' : '☰ 메뉴 펼치기'}
           </button>
-          {!sidebar && <div className="text-sm font-bold text-white">BNF Trading Studio</div>}
+          {!sidebar && <div className="text-sm font-bold text-ink">BNF Trading Studio</div>}
           <button className="btn-ghost !py-1 !px-3 text-sm" onClick={toggleFullscreen} title="전체화면 전환">
             {isFs ? '🡻 화면축소' : '⛶ 전체화면'}
           </button>

@@ -121,17 +121,17 @@ export default function BacktestPage() {
         { label: '승률', value: `${m.winRate.toFixed(1)}%`, color: m.winRate >= 50 ? 'text-profit' : 'text-amber-400' },
         { label: 'MDD', value: `${m.mdd.toFixed(2)}%`, color: 'text-amber-400' },
         { label: 'Profit Factor', value: m.profitFactor >= 999 ? '∞' : m.profitFactor.toFixed(2), color: m.profitFactor >= 1.5 ? 'text-profit' : 'text-amber-400' },
-        { label: 'Sharpe Ratio', value: m.sharpe.toFixed(2), color: 'text-white' },
-        { label: '연평균수익률', value: `${m.cagr.toFixed(2)}%`, color: 'text-white' },
-        { label: '거래횟수', value: `${m.tradeCount}회`, color: 'text-white' },
-        { label: '평균보유기간', value: `${m.avgHoldBars.toFixed(1)}봉`, color: 'text-white' },
+        { label: 'Sharpe Ratio', value: m.sharpe.toFixed(2), color: 'text-ink' },
+        { label: '연평균수익률', value: `${m.cagr.toFixed(2)}%`, color: 'text-ink' },
+        { label: '거래횟수', value: `${m.tradeCount}회`, color: 'text-ink' },
+        { label: '평균보유기간', value: `${m.avgHoldBars.toFixed(1)}봉`, color: 'text-ink' },
       ]
     : [];
 
   return (
     <div className="space-y-4">
       <header>
-        <h1 className="text-2xl font-bold text-white">백테스트</h1>
+        <h1 className="text-2xl font-bold text-ink">백테스트</h1>
         <p className="text-sm text-slate-400 mt-1">{mod.short}</p>
       </header>
 
@@ -192,9 +192,9 @@ export default function BacktestPage() {
 
           <div className="card">
             <div className="flex items-center justify-between mb-2">
-              <h3 className="font-bold text-white">자산 곡선 (Equity Curve)</h3>
+              <h3 className="font-bold text-ink">자산 곡선 (Equity Curve)</h3>
               <div className="text-sm text-slate-400">
-                최종자산 <span className="text-white font-bold">{fmt(m.finalBalance)}원</span>
+                최종자산 <span className="text-ink font-bold">{fmt(m.finalBalance)}원</span>
               </div>
             </div>
             <EquityChart data={result.equityCurve} />
@@ -211,7 +211,7 @@ export default function BacktestPage() {
           </div>
 
           <div className="card">
-            <h3 className="font-bold text-white mb-2">거래 로그 ({result.trades.length}건)</h3>
+            <h3 className="font-bold text-ink mb-2">거래 로그 ({result.trades.length}건)</h3>
             <div className="max-h-72 overflow-y-auto text-sm space-y-1">
               {result.logs.map((log, i) => (
                 <div key={i} className={`px-3 py-1.5 rounded ${
@@ -229,7 +229,7 @@ export default function BacktestPage() {
       {/* 저장된 결과 */}
       {!guestMode && saved.length > 0 && (
         <div className="card overflow-x-auto">
-          <h3 className="font-bold text-white mb-2">저장된 백테스트 이력</h3>
+          <h3 className="font-bold text-ink mb-2">저장된 백테스트 이력</h3>
           <table className="w-full">
             <thead>
               <tr className="border-b border-edge">
@@ -242,7 +242,7 @@ export default function BacktestPage() {
                 <tr key={s.id} className="border-b border-edge/50">
                   <td className="td text-slate-400">{new Date(s.created_at).toLocaleString('ko-KR')}</td>
                   <td className="td text-slate-300">{getStrategy(s.strategy_code ?? 'bnf1').name.split('·')[0].trim()}</td>
-                  <td className="td text-white">{s.name || s.symbol}</td>
+                  <td className="td text-ink">{s.name || s.symbol}</td>
                   <td className="td">{s.interval}</td>
                   <td className="td">{s.range_label}</td>
                   <td className={`td font-bold ${(s.metrics.totalReturn ?? 0) >= 0 ? 'text-up' : 'text-down'}`}>{(s.metrics.totalReturn ?? 0).toFixed(2)}%</td>

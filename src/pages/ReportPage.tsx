@@ -67,7 +67,7 @@ export default function ReportPage() {
     <div className="space-y-5">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">전체 리포트</h1>
+          <h1 className="text-2xl font-bold text-ink">전체 리포트</h1>
           <p className="text-sm text-slate-400 mt-1">
             코스피({KOSPI_STOCKS.length}) · 코스닥({KOSDAQ_STOCKS.length}) 주요종목 × 전체 전략({mods.length}) 종합 스캔
           </p>
@@ -88,7 +88,7 @@ export default function ReportPage() {
       {sections.map(({ mod, scans }) => (
         <div key={mod.code} className="card space-y-2">
           <div>
-            <h2 className="font-bold text-white">{mod.name}</h2>
+            <h2 className="font-bold text-ink">{mod.name}</h2>
             <p className="text-xs text-slate-500 mt-0.5">{mod.short}</p>
           </div>
           <div className="overflow-x-auto">
@@ -107,10 +107,10 @@ export default function ReportPage() {
                   const q = quotes[r.symbol];
                   return (
                     <tr key={r.symbol} className="border-b border-edge/50 hover:bg-edge/30">
-                      <td className="td font-medium text-white">
+                      <td className="td font-medium text-ink">
                         <Link to={`/chart?symbol=${r.symbol}&strat=${mod.code}`} className="hover:text-accent">{r.name}</Link>
                       </td>
-                      <td className="td text-white">{fmt(r.price)}</td>
+                      <td className="td text-ink">{fmt(r.price)}</td>
                       <td className={`td ${r.changePct >= 0 ? 'text-up' : 'text-down'}`}>{r.changePct.toFixed(2)}%</td>
                       <td className="td text-slate-400">{fmt(q?.prevClose)}</td>
                       <td className="td text-up">{fmt(q?.high)}</td>
@@ -120,7 +120,7 @@ export default function ReportPage() {
                       {r.cols.map((c, i) => <td key={i} className={`td ${toneCls(c.tone)}`}>{c.value}</td>)}
                       <td className="td">{r.buy ? <span className="badge bg-up/20 text-up">매수</span> : <span className="text-slate-500">-</span>}</td>
                       <td className="td">{r.exit ? <span className="badge bg-amber-500/20 text-amber-400">매도</span> : <span className="text-slate-500">-</span>}</td>
-                      <td className="td font-bold text-white">{r.score}</td>
+                      <td className="td font-bold text-ink">{r.score}</td>
                       <td className="td"><Stars n={r.stars} /></td>
                     </tr>
                   );

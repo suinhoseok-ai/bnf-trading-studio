@@ -45,7 +45,7 @@ export default function LoginPage() {
     <div className="min-h-screen flex items-center justify-center p-4">
       <div className="w-full max-w-md">
         <div className="text-center mb-8">
-          <h1 className="text-3xl font-bold text-white">BNF Trading Studio</h1>
+          <h1 className="text-3xl font-bold text-ink">BNF Trading Studio</h1>
           <p className="text-accent mt-1 text-sm">AI Edition · 볼린저밴드 수렴 회귀 전략 시뮬레이터</p>
         </div>
         <div className="card">

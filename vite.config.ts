@@ -38,6 +38,7 @@ function telegramDevProxy(): Plugin {
 export default defineConfig({
   plugins: [react(), telegramDevProxy()],
   server: {
+    port: Number(process.env.PORT) || 5173,
     proxy: {
       '/api/yahoo': {
         target: 'https://query1.finance.yahoo.com',

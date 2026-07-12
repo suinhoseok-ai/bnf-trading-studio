@@ -127,7 +127,7 @@ export default function ScannerPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">종목 스캐너</h1>
+          <h1 className="text-2xl font-bold text-ink">종목 스캐너</h1>
           <p className="text-sm text-slate-400 mt-1">{mod.short}</p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
@@ -177,7 +177,7 @@ export default function ScannerPage() {
                     {watchlist.some((w) => w.symbol === r.symbol) ? '⭐' : '☆'}
                   </button>
                 </td>
-                <td className="td font-medium text-white">
+                <td className="td font-medium text-ink">
                   <Link to={`/chart?symbol=${r.symbol}&strat=${stratCode}`} className="hover:text-accent" title="차트 보기">{r.name}</Link>
                 </td>
                 <td className="td">{r.price.toLocaleString('ko-KR', { maximumFractionDigits: 0 })}</td>
@@ -185,7 +185,7 @@ export default function ScannerPage() {
                 {r.cols.map((c, i) => <td key={i} className={`td ${toneCls(c.tone)}`}>{c.value}</td>)}
                 <td className="td">{r.buy ? <span className="badge bg-up/20 text-up">매수</span> : <span className="text-slate-500">-</span>}</td>
                 <td className="td">{r.exit ? <span className="badge bg-amber-500/20 text-amber-400">매도</span> : <span className="text-slate-500">-</span>}</td>
-                <td className="td font-bold text-white">{r.score}</td>
+                <td className="td font-bold text-ink">{r.score}</td>
                 <td className="td"><Stars n={r.stars} /></td>
                 <td className="td space-x-2">
                   <Link to={`/chart?symbol=${r.symbol}&strat=${stratCode}`} className="text-accent hover:underline text-sm">차트</Link>
@@ -209,7 +209,7 @@ export default function ScannerPage() {
         <div className="card border-purple-500/40">
           <div className="flex items-center justify-between mb-2">
             <h3 className="font-bold text-purple-300">🤖 Qwen3 AI 분석 — {aiTarget.name}</h3>
-            <button className="text-slate-500 hover:text-white" onClick={() => setAiTarget(null)}>✕</button>
+            <button className="text-slate-500 hover:text-ink" onClick={() => setAiTarget(null)}>✕</button>
           </div>
           {aiBusy ? (
             <div className="text-sm text-slate-400 animate-pulse py-4">Qwen3가 분석 중입니다...</div>

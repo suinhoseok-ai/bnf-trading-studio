@@ -220,7 +220,7 @@ export default function PaperPage() {
   if (!account) {
     return (
       <div className="space-y-4">
-        <h1 className="text-2xl font-bold text-white">모의투자</h1>
+        <h1 className="text-2xl font-bold text-ink">모의투자</h1>
         <div className="card text-center py-12">
           <div className="text-4xl mb-3">💰</div>
           <p className="text-slate-300 mb-1">가상 계좌를 개설하고 전략 자동매매 모의투자를 시작하세요.</p>
@@ -235,7 +235,7 @@ export default function PaperPage() {
     <div className="space-y-4">
       <header className="flex items-center justify-between flex-wrap gap-3">
         <div>
-          <h1 className="text-2xl font-bold text-white">모의투자</h1>
+          <h1 className="text-2xl font-bold text-ink">모의투자</h1>
           <p className="text-sm text-slate-400 mt-1">전략 자동매매 시뮬레이션 · 보유 포지션은 각 포지션 전략 기준으로 청산</p>
         </div>
         <div className="flex gap-2 flex-wrap items-center">
@@ -253,15 +253,15 @@ export default function PaperPage() {
       </header>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-        <div className="card !p-3"><div className="text-xs text-slate-400">총 평가자산</div><div className="text-lg font-bold text-white">{fmt(totalEquity)}원</div></div>
-        <div className="card !p-3"><div className="text-xs text-slate-400">가용 현금</div><div className="text-lg font-bold text-white">{fmt(account.cash)}원</div></div>
-        <div className="card !p-3"><div className="text-xs text-slate-400">보유 평가액</div><div className="text-lg font-bold text-white">{fmt(positionValue)}원</div></div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">총 평가자산</div><div className="text-lg font-bold text-ink">{fmt(totalEquity)}원</div></div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">가용 현금</div><div className="text-lg font-bold text-ink">{fmt(account.cash)}원</div></div>
+        <div className="card !p-3"><div className="text-xs text-slate-400">보유 평가액</div><div className="text-lg font-bold text-ink">{fmt(positionValue)}원</div></div>
         <div className="card !p-3"><div className="text-xs text-slate-400">총 수익률</div><div className={`text-lg font-bold ${totalReturn >= 0 ? 'text-up' : 'text-down'}`}>{totalReturn.toFixed(2)}%</div></div>
       </div>
 
       {log.length > 0 && (
         <div className="card">
-          <h3 className="font-bold text-white mb-2">자동매매 실행 결과</h3>
+          <h3 className="font-bold text-ink mb-2">자동매매 실행 결과</h3>
           <div className="space-y-1 text-sm">
             {log.map((l, i) => (
               <div key={i} className={`px-3 py-1.5 rounded ${l.includes('[매수]') ? 'bg-up/10 text-up' : l.includes('익절') ? 'bg-profit/10 text-profit' : 'bg-edge/50 text-slate-300'}`}>{l}</div>
@@ -271,7 +271,7 @@ export default function PaperPage() {
       )}
 
       <div className="card overflow-x-auto">
-        <h3 className="font-bold text-white mb-2">보유 포지션 ({positions.length})</h3>
+        <h3 className="font-bold text-ink mb-2">보유 포지션 ({positions.length})</h3>
         <table className="w-full">
           <thead>
             <tr className="border-b border-edge">
@@ -286,7 +286,7 @@ export default function PaperPage() {
               const pnl = Number(p.shares) * (cur - Number(p.entry_price));
               return (
                 <tr key={p.id} className="border-b border-edge/50">
-                  <td className="td font-medium text-white">{p.name || stockName(p.symbol)}</td>
+                  <td className="td font-medium text-ink">{p.name || stockName(p.symbol)}</td>
                   <td className="td text-slate-400 text-xs">{getStrategy(p.strategy_code ?? 'bnf1').name.split('·')[0].trim()}</td>
                   <td className="td">{fmt(Number(p.entry_price))}</td>
                   <td className="td">{fmt(cur)}</td>
@@ -303,7 +303,7 @@ export default function PaperPage() {
       </div>
 
       <div className="card overflow-x-auto">
-        <h3 className="font-bold text-white mb-2">거래 내역 (최근 50건)</h3>
+        <h3 className="font-bold text-ink mb-2">거래 내역 (최근 50건)</h3>
         <table className="w-full">
           <thead>
             <tr className="border-b border-edge">
@@ -316,7 +316,7 @@ export default function PaperPage() {
             {trades.map((t) => (
               <tr key={t.id} className="border-b border-edge/50">
                 <td className="td text-slate-400">{new Date(t.executed_at).toLocaleString('ko-KR')}</td>
-                <td className="td text-white">{t.name || stockName(t.symbol)}</td>
+                <td className="td text-ink">{t.name || stockName(t.symbol)}</td>
                 <td className="td"><span className={`badge ${sideLabel[t.side]?.cls ?? ''}`}>{sideLabel[t.side]?.text ?? t.side}</span></td>
                 <td className="td">{fmt(Number(t.price))}</td>
                 <td className="td">{Number(t.shares).toFixed(2)}주</td>

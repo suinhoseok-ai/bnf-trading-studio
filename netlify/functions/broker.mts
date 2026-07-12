@@ -84,11 +84,9 @@ export default async (req: Request) => {
           mode: s.mode === 'real' ? 'real' : 'paper',
           account_no: String(s.accountNo ?? '').replace(/\D/g, '').slice(0, 8),
           account_product_cd: String(s.accountProductCd ?? '01').replace(/\D/g, '').slice(0, 2) || '01',
-          strategy_code: String(s.strategyCode ?? 'bnf1'),
           universe: String(s.universe ?? 'KOSPI'),
           interval_min: Math.max(10, Number(s.intervalMin) || 10),
           max_positions: Math.min(20, Math.max(1, Number(s.maxPositions) || 5)),
-          budget_pct: Math.min(100, Math.max(1, Number(s.budgetPct) || 10)),
           updated_at: new Date().toISOString(),
         };
         // 키는 새 값이 입력된 경우에만 갱신 (빈 값이면 기존 유지)
@@ -98,13 +96,28 @@ export default async (req: Request) => {
         if (existing && (existing.broker !== row.broker || existing.mode !== row.mode)) row.token = {};
         const { error } = await sb.from('bnf_trading_settings').upsert(row);
         if (error) return json({ ok: false, error: error.message }, 500);
-        await log(sb, uid, 'info', '설정 저장', `${row.broker}/${row.mode} 전략=${row.strategy_code}`);
+
+        // 전략별 예산 (다중 전략 — 기존 목록 전체 재기록)
+        const strategies = Array.isArray(body.strategies) ? (body.strategies as Record<string, unknown>[]) : [];
+        await sb.from('bnf_trading_strategies').delete().eq('user_id', uid);
+        const stratRows = strategies
+          .map((st) => ({
+            user_id: uid,
+            strategy_code: String(st.strategyCode ?? ''),
+            budget: Math.max(0, Number(st.budget) || 0),
+            enabled: !!st.enabled,
+          }))
+          .filter((st) => st.strategy_code && st.enabled && st.budget > 0);
+        if (stratRows.length > 0) await sb.from('bnf_trading_strategies').insert(stratRows);
+
+        await log(sb, uid, 'info', '설정 저장', `${row.broker}/${row.mode} 전략 ${stratRows.length}개`);
         return json({ ok: true, encryption: encryptionEnabled() });
       }
 
       case 'get-settings': {
         const row = await loadSettings();
         if (!row) return json({ ok: true, settings: null, encryption: encryptionEnabled() });
+        const { data: strategies } = await sb.from('bnf_trading_strategies').select('strategy_code, budget, enabled').eq('user_id', uid);
         return json({
           ok: true,
           encryption: encryptionEnabled(),
@@ -113,8 +126,9 @@ export default async (req: Request) => {
             accountNo: row.account_no, accountProductCd: row.account_product_cd,
             appKeyMasked: maskKey(row.app_key), appSecretSet: !!row.app_secret,
             enabled: row.enabled, status: row.status,
-            strategyCode: row.strategy_code, universe: row.universe,
-            intervalMin: row.interval_min, maxPositions: row.max_positions, budgetPct: row.budget_pct,
+            universe: row.universe,
+            intervalMin: row.interval_min, maxPositions: row.max_positions,
+            strategies: (strategies ?? []).map((s) => ({ strategyCode: s.strategy_code, budget: Number(s.budget), enabled: s.enabled })),
             lastRunAt: row.last_run_at, lastError: row.last_error,
           },
         });
@@ -184,7 +198,12 @@ export default async (req: Request) => {
         const running = !!body.running;
         const row = await loadSettings();
         if (!row) return json({ ok: false, error: '설정을 먼저 저장하세요.' }, 400);
+        let stratCount = 0;
         if (running) {
+          const { count } = await sb.from('bnf_trading_strategies')
+            .select('id', { count: 'exact', head: true }).eq('user_id', uid).eq('enabled', true).gt('budget', 0);
+          stratCount = count ?? 0;
+          if (stratCount === 0) return json({ ok: false, error: '실행할 전략과 예산이 설정되지 않았습니다. 전략별 예산을 먼저 저장하세요.' }, 400);
           // 시작 전 연결 검증
           const adapter = await makeAdapter(sb, row);
           await adapter.getAccount();
@@ -192,7 +211,7 @@ export default async (req: Request) => {
         await sb.from('bnf_trading_settings').update({
           enabled: running, status: running ? 'RUNNING' : 'STOPPED', last_error: '', updated_at: new Date().toISOString(),
         }).eq('user_id', uid);
-        await log(sb, uid, 'info', running ? '자동매매 시작' : '자동매매 중지', `${row.broker}/${row.mode} 전략=${row.strategy_code}`);
+        await log(sb, uid, 'info', running ? '자동매매 시작' : '자동매매 중지', `${row.broker}/${row.mode} 전략 ${stratCount}개`);
         return json({ ok: true, status: running ? 'RUNNING' : 'STOPPED' });
       }
 

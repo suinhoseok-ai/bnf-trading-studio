@@ -68,7 +68,7 @@ export default function AIPage() {
     <div className="flex flex-col h-full max-h-[calc(100vh-3rem)] space-y-4">
       <header className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-white">AI 분석 (Qwen3)</h1>
+          <h1 className="text-2xl font-bold text-ink">AI 분석 (Qwen3)</h1>
           <p className="text-sm text-slate-400 mt-1">
             로컬 AI 투자 비서 — 계산은 전략 엔진이, 분석·설명·추천은 Qwen3가 담당합니다.
           </p>
