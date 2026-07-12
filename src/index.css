@@ -14,7 +14,7 @@
 @layer components {
   .card { @apply bg-panel border border-edge rounded-xl p-4; }
   .btn { @apply px-4 py-2 rounded-lg font-medium text-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed; }
-  .btn-primary { @apply btn bg-accent text-white hover:bg-blue-600; }
+  .btn-primary { @apply btn bg-accent text-white hover:bg-blue-800; }
   .btn-ghost { @apply btn bg-edge/50 text-slate-300 hover:bg-edge; }
   .btn-danger { @apply btn bg-red-600/80 text-white hover:bg-red-600; }
   .input { @apply bg-base border border-edge rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-accent w-full; }

@@ -1,11 +1,13 @@
 // ===== 자동매매 엔진 (Netlify 예약 함수 — 브라우저 없이 24시간 동작) =====
 // 장중 10분 주기로 실행. AI를 사용하지 않으며, 전략 엔진의 트리거만으로 주문한다.
+// 전략 카드(bnf_trading_strategies) 단위로 완전히 독립 실행 — 각자 자기만의
+// 스캔대상(universe)·실행주기(interval_min)·최대보유수(max_positions)·예산(budget)을 가진다.
 //
-// Flow (사용자별):
-//  1. 장중 + 실행주기 확인
+// Flow (사용자별, status='RUNNING'인 전략이 1개 이상 있는 사용자만 처리):
+//  1. 장중 확인
 //  2. Broker Adapter 연결 (토큰 캐시)
-//  3. [매도] 보유 전략 포지션 → 전략 stepOpen 트리거 → 시장가 매도
-//  4. [매수] 유니버스 스캔 → 매수 트리거 → 예산 내 시장가 매수
+//  3. [매도] 보유 전략 포지션 전체 → 전략 stepOpen 트리거 → 시장가 매도 (전략 실행상태와 무관하게 항상 수행)
+//  4. [매수] RUNNING 전략별로 자기 주기 스로틀링 → 유니버스 스캔 → 매수 트리거 → 전략 예산 내 점수가중 배분 시장가 매수
 //  5. 거래이력·로그 DB 저장 + 텔레그램 알림
 //
 // 필요한 환경변수: SUPABASE_URL(또는 VITE_), SUPABASE_SERVICE_ROLE_KEY, (권장) BROKER_ENC_KEY
@@ -65,9 +67,12 @@ async function tgSend(token: string, chatId: string, text: string) {
 interface SettingsRow {
   user_id: string; broker: string; mode: 'paper' | 'real';
   app_key: string; app_secret: string; account_no: string; account_product_cd: string;
-  enabled: boolean; status: string; strategy_code: string; universe: string;
-  interval_min: number; max_positions: number; budget_pct: number;
-  token: TokenCache; last_run_at: string | null;
+  token: TokenCache;
+}
+
+interface StrategyRow {
+  id: number; strategy_code: string; universe: string;
+  interval_min: number; max_positions: number; budget: number; last_run_at: string | null;
 }
 
 export default async () => {
@@ -78,8 +83,9 @@ export default async () => {
   if (!url || !key) { console.log('[trader] env 미설정'); return new Response('skip: env'); }
   const sb = createClient(url, key, { auth: { persistSession: false } });
 
-  const { data: rows } = await sb.from('bnf_trading_settings').select('*').eq('enabled', true).eq('status', 'RUNNING');
-  if (!rows?.length) return new Response('skip: no active traders');
+  const { data: activeStrats } = await sb.from('bnf_trading_strategies').select('user_id').eq('status', 'RUNNING');
+  const uids = [...new Set((activeStrats ?? []).map((s) => s.user_id as string))];
+  if (!uids.length) return new Response('skip: no active traders');
 
   const now = Date.now();
   const results: string[] = [];
@@ -94,13 +100,13 @@ export default async () => {
     return c;
   };
 
-  for (const raw of rows as SettingsRow[]) {
-    const uid = raw.user_id;
+  for (const uid of uids) {
     const log = (level: string, event: string, detail: string) =>
       sb.from('bnf_trade_logs').insert({ user_id: uid, level, event, detail });
 
-    // 실행 주기 확인
-    if (raw.last_run_at && now - new Date(raw.last_run_at).getTime() < Math.max(10, raw.interval_min) * 60_000 - 30_000) continue;
+    const { data: settingsData } = await sb.from('bnf_trading_settings').select('*').eq('user_id', uid).maybeSingle();
+    const raw = settingsData as SettingsRow | null;
+    if (!raw) { await log('warn', '자동매매 스킵', '거래소 연결 설정이 없습니다.'); continue; }
 
     // 텔레그램 설정 (체결 알림용)
     const { data: prof } = await sb.from('bnf_profiles').select('settings').eq('id', uid).maybeSingle();
@@ -122,11 +128,11 @@ export default async () => {
 
       const modeTag = raw.mode === 'real' ? '실전' : '모의';
 
-      // 사용자별 다중 전략 예산 (전략별 원화 절대금액 한도, budget=0 또는 미사용은 제외)
+      // 이 사용자의 실행 중(RUNNING) + 예산 설정된 전략 카드 (완전 독립 실행 단위)
       const { data: stratRows } = await sb.from('bnf_trading_strategies')
-        .select('strategy_code, budget').eq('user_id', uid).eq('enabled', true).gt('budget', 0);
-      const strategies = (stratRows ?? []) as { strategy_code: string; budget: number }[];
-      if (strategies.length === 0) await log('warn', '매수 스캔 생략', '활성화된 전략(예산>0)이 없습니다. 자동매매 페이지에서 전략별 예산을 설정하세요.');
+        .select('id, strategy_code, universe, interval_min, max_positions, budget, last_run_at')
+        .eq('user_id', uid).eq('status', 'RUNNING').gt('budget', 0);
+      const strategies = (stratRows ?? []) as StrategyRow[];
 
       // ── 1. 매도 트리거 (보유 전략 포지션) ──
       const { data: openPos } = await sb.from('bnf_live_positions').select('*').eq('user_id', uid).eq('status', 'OPEN');
@@ -184,100 +190,115 @@ export default async () => {
         }
       }
 
-      // ── 2. 매수 트리거 (전략별 유니버스 스캔 + 예산 내 점수가중 배분) ──
-      const { count: openCount } = await sb.from('bnf_live_positions')
-        .select('id', { count: 'exact', head: true }).eq('user_id', uid).eq('status', 'OPEN');
-      let slots = Math.max(0, raw.max_positions - (openCount ?? 0));
+      // ── 2. 매수 트리거 (전략 카드별 완전 독립 실행: 자기 주기·유니버스·최대보유수·예산) ──
       let buys = 0;
+      let account: { cash: number } | null = null;
+      const heldSymbols = new Set([
+        ...brokerPositions.map((p) => p.symbol),
+        ...(openPos ?? []).map((p) => toKrCode((p as { symbol: string }).symbol)),
+      ]);
 
-      if (slots > 0 && strategies.length > 0) {
-        const account = await adapter.getAccount();
-        let cash = account.cash;
-        const heldSymbols = new Set([
-          ...brokerPositions.map((p) => p.symbol),
-          ...(openPos ?? []).map((p) => toKrCode((p as { symbol: string }).symbol)),
-        ]);
-        const stocks = universeStocks(raw.universe || 'KOSPI').slice(0, UNIVERSE_CAP);
+      for (const strat of strategies) {
+        if (buys >= MAX_BUYS_PER_RUN) break;
+        // 전략별 실행주기 스로틀링
+        if (strat.last_run_at && now - new Date(strat.last_run_at).getTime() < Math.max(10, strat.interval_min) * 60_000 - 30_000) continue;
 
-        for (const strat of strategies) {
-          if (slots <= 0 || buys >= MAX_BUYS_PER_RUN) break;
+        const stratLog = (level: string, event: string, detail: string) => log(level, event, detail);
+        try {
           const mod = getStrategy(strat.strategy_code);
           await mod.init?.(fetchCandlesServer);
+
+          // 이 전략카드의 현재 보유 종목 수 → 슬롯 = 최대보유수 - 보유중
+          const strategyOpenCount = (openPos ?? []).filter((p) => (p as { strategy_code: string }).strategy_code === strat.strategy_code).length;
+          let slots = Math.max(0, strat.max_positions - strategyOpenCount);
 
           // 이 전략으로 현재 보유 중인 금액(투입액) → 잔여 예산 = 전략 예산 - 투입액
           const invested = (openPos ?? [])
             .filter((p) => (p as { strategy_code: string }).strategy_code === strat.strategy_code)
             .reduce((sum, p) => sum + Number((p as { entry_price: number }).entry_price) * Number((p as { shares: number }).shares), 0);
           const remainingBudget = Math.max(0, strat.budget - invested);
-          if (remainingBudget < 1) {
-            await log('info', '매수 스킵', `${mod.name}: 전략 예산 소진 (예산 ${Math.round(strat.budget).toLocaleString('ko-KR')}원, 투입 ${Math.round(invested).toLocaleString('ko-KR')}원)`);
-            continue;
-          }
 
-          // 신호 수집 (배치) — 점수(score)까지 함께 계산해 배분 비중으로 사용
-          const signals: { symbol: string; name: string; rows: StratRow[]; score: number }[] = [];
-          for (let i = 0; i < stocks.length; i += BATCH) {
-            await Promise.all(stocks.slice(i, i + BATCH).map(async (s) => {
-              if (heldSymbols.has(toKrCode(s.symbol))) return;
-              try {
-                const candles = await getCandles(s.symbol, mod.interval, mod.range);
-                if (candles.length < 30) return;
-                const rs = mod.compute(candles);
-                if (!rs[rs.length - 1]?.buy) return;
-                const scan = mod.scan(s.symbol, s.name, rs);
-                signals.push({ symbol: s.symbol, name: s.name, rows: rs, score: scan.score });
-              } catch { /* skip */ }
-            }));
-          }
-          if (signals.length === 0) continue;
+          if (slots <= 0 || remainingBudget < 1) {
+            await stratLog('info', '매수 스킵', `${mod.name}: ${slots <= 0 ? '최대 보유 종목 수 도달' : `전략 예산 소진 (예산 ${Math.round(strat.budget).toLocaleString('ko-KR')}원, 투입 ${Math.round(invested).toLocaleString('ko-KR')}원)`}`);
+          } else {
+            if (!account) account = await adapter.getAccount();
+            let cash = account.cash;
+            const stocks = universeStocks(strat.universe || 'KOSPI').slice(0, UNIVERSE_CAP);
 
-          // 같은 회차에 잡힌 신호들 = 전략 잔여예산을 점수(추천도) 비중으로 배분
-          const totalScore = signals.reduce((sum, x) => sum + Math.max(1, x.score), 0);
+            // 신호 수집 (배치) — 점수(score)까지 함께 계산해 배분 비중으로 사용
+            const signals: { symbol: string; name: string; rows: StratRow[]; score: number }[] = [];
+            for (let i = 0; i < stocks.length; i += BATCH) {
+              await Promise.all(stocks.slice(i, i + BATCH).map(async (s) => {
+                if (heldSymbols.has(toKrCode(s.symbol))) return;
+                try {
+                  const candles = await getCandles(s.symbol, mod.interval, mod.range);
+                  if (candles.length < 30) return;
+                  const rs = mod.compute(candles);
+                  if (!rs[rs.length - 1]?.buy) return;
+                  const scan = mod.scan(s.symbol, s.name, rs);
+                  signals.push({ symbol: s.symbol, name: s.name, rows: rs, score: scan.score });
+                } catch { /* skip */ }
+              }));
+            }
 
-          for (const sig of signals) {
-            if (slots <= 0 || buys >= MAX_BUYS_PER_RUN) break;
-            const lastRow = sig.rows[sig.rows.length - 1];
-            // planEntry에서는 손절가(sl)·트리거 설명만 사용, 수량은 점수가중 배분 예산으로 별도 계산
-            const plan = mod.planEntry(sig.rows, sig.rows.length - 1, cash);
-            if (!plan) continue;
-            const weight = Math.max(1, sig.score) / totalScore;
-            const alloc = Math.min(remainingBudget * weight, cash);
-            const qty = Math.floor(alloc / lastRow.close);
-            if (qty < 1) { await log('warn', '매수 스킵', `${sig.name}: 배분 예산 부족 (${mod.name} 배분액 ${Math.round(alloc).toLocaleString('ko-KR')}원 < 1주, 점수 ${sig.score}·★${starsFromScore(sig.score)})`); continue; }
+            if (signals.length > 0) {
+              // 같은 회차에 잡힌 신호들 = 전략 잔여예산을 점수(추천도) 비중으로 배분
+              const totalScore = signals.reduce((sum, x) => sum + Math.max(1, x.score), 0);
 
-            const r = await adapter.placeBuyOrder(sig.symbol, qty, 0); // 시장가
-            await sb.from('bnf_live_trades').insert({
-              user_id: uid, broker: raw.broker, mode: raw.mode, symbol: sig.symbol, name: sig.name,
-              strategy_code: mod.code, side: 'BUY', trigger_note: plan.note,
-              order_type: 'market', order_price: lastRow.close, qty,
-              order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
-            });
-            await log(r.ok ? 'info' : 'error', '매수 트리거',
-              `${sig.name} ${qty}주 @~${Math.round(lastRow.close).toLocaleString('ko-KR')} · 점수 ${sig.score}(★${starsFromScore(sig.score)}) · ${plan.note} → ${r.ok ? `접수 ${r.orderNo}` : `실패: ${r.message}`}`);
-            if (r.ok) {
-              await sb.from('bnf_live_positions').insert({
-                user_id: uid, broker: raw.broker, symbol: sig.symbol, name: sig.name,
-                strategy_code: mod.code, entry_price: lastRow.close, shares: qty,
-                sl: plan.sl, tp1_hit: false, order_no: r.orderNo ?? '',
-              });
-              await notify(`🟢 <b>[자동매매·${modeTag}] 매수 주문</b>\n${sig.name} ${qty}주 (시장가 ~${Math.round(lastRow.close).toLocaleString('ko-KR')}원)\n전략: ${mod.name.split('·')[0].trim()} (점수 ${sig.score}·★${starsFromScore(sig.score)})\n${plan.note}`);
-              cash -= qty * lastRow.close;
-              heldSymbols.add(toKrCode(sig.symbol));
-              slots--; buys++;
+              for (const sig of signals) {
+                if (slots <= 0 || buys >= MAX_BUYS_PER_RUN) break;
+                const lastRow = sig.rows[sig.rows.length - 1];
+                // planEntry에서는 손절가(sl)·트리거 설명만 사용, 수량은 점수가중 배분 예산으로 별도 계산
+                const plan = mod.planEntry(sig.rows, sig.rows.length - 1, cash);
+                if (!plan) continue;
+                const weight = Math.max(1, sig.score) / totalScore;
+                const alloc = Math.min(remainingBudget * weight, cash);
+                const qty = Math.floor(alloc / lastRow.close);
+                if (qty < 1) { await stratLog('warn', '매수 스킵', `${sig.name}: 배분 예산 부족 (배분액 ${Math.round(alloc).toLocaleString('ko-KR')}원 < 1주, 점수 ${sig.score}·★${starsFromScore(sig.score)})`); continue; }
+
+                const r = await adapter.placeBuyOrder(sig.symbol, qty, 0); // 시장가
+                await sb.from('bnf_live_trades').insert({
+                  user_id: uid, broker: raw.broker, mode: raw.mode, symbol: sig.symbol, name: sig.name,
+                  strategy_code: mod.code, side: 'BUY', trigger_note: plan.note,
+                  order_type: 'market', order_price: lastRow.close, qty,
+                  order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
+                });
+                await stratLog(r.ok ? 'info' : 'error', '매수 트리거',
+                  `${sig.name} ${qty}주 @~${Math.round(lastRow.close).toLocaleString('ko-KR')} · 점수 ${sig.score}(★${starsFromScore(sig.score)}) · ${plan.note} → ${r.ok ? `접수 ${r.orderNo}` : `실패: ${r.message}`}`);
+                if (r.ok) {
+                  await sb.from('bnf_live_positions').insert({
+                    user_id: uid, broker: raw.broker, symbol: sig.symbol, name: sig.name,
+                    strategy_code: mod.code, entry_price: lastRow.close, shares: qty,
+                    sl: plan.sl, tp1_hit: false, order_no: r.orderNo ?? '',
+                  });
+                  await notify(`🟢 <b>[자동매매·${modeTag}] 매수 주문</b>\n${sig.name} ${qty}주 (시장가 ~${Math.round(lastRow.close).toLocaleString('ko-KR')}원)\n전략: ${mod.name.split('·')[0].trim()} (점수 ${sig.score}·★${starsFromScore(sig.score)})\n${plan.note}`);
+                  cash -= qty * lastRow.close;
+                  account.cash = cash;
+                  heldSymbols.add(toKrCode(sig.symbol));
+                  slots--; buys++;
+                }
+              }
             }
           }
+
+          await sb.from('bnf_trading_strategies').update({
+            last_run_at: new Date().toISOString(), last_error: '', updated_at: new Date().toISOString(),
+          }).eq('id', strat.id);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : String(e);
+          await sb.from('bnf_trading_strategies').update({
+            status: 'ERROR', last_error: msg, last_run_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+          }).eq('id', strat.id);
+          await stratLog('error', '전략 실행 오류', `${strat.strategy_code}: ${msg}`);
         }
       }
 
-      await sb.from('bnf_trading_settings').update({
-        last_run_at: new Date().toISOString(), last_error: '', updated_at: new Date().toISOString(),
-      }).eq('user_id', uid);
       results.push(`${uid.slice(0, 8)}:ok(buys=${buys})`);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      await sb.from('bnf_trading_settings').update({
-        status: 'ERROR', last_error: msg, last_run_at: new Date().toISOString(), updated_at: new Date().toISOString(),
-      }).eq('user_id', uid);
+      await sb.from('bnf_trading_strategies').update({
+        status: 'ERROR', last_error: msg, updated_at: new Date().toISOString(),
+      }).eq('user_id', uid).eq('status', 'RUNNING');
       await log('error', '자동매매 실행 오류', msg);
       await notify(`⚠️ <b>[자동매매] 오류로 일시 중지</b>\n${msg}\n웹 자동매매 페이지에서 확인 후 다시 시작하세요.`);
       results.push(`${uid.slice(0, 8)}:error`);

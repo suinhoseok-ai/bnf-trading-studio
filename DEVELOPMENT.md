@@ -205,18 +205,18 @@ node verify.tmp.cjs; rm -f verify.tmp.ts verify.tmp.cjs
 - `index.ts` — `getAdapter()` 팩토리 + API 키 암호화(`encryptSecret`/`decryptSecret`, AES-256-GCM, `BROKER_ENC_KEY` 기반. 미설정 시 `plain:` base64 폴백 + UI 경고), `maskKey()`
 
 ### 6.2 무인 실행 엔진 `trader.mts` (예약함수 `*/10 * * * *`)
-브라우저 불필요. 장중(`isKoreanMarketOpen`)에만. `bnf_trading_settings`에서 `enabled=true & status='RUNNING'` 사용자 순회:
-1. Broker connect (토큰 캐시)
-2. **매도**: `bnf_live_positions`(OPEN) → 각 포지션의 `strategy_code`로 전략 모듈 조회 → `stepOpen` 트리거 → 시장가 매도 (거래소 매도가능수량 범위 내). 다중 전략 포지션이 섞여 있어도 각자 자기 전략으로 청산됨.
-3. **매수 (다중 전략 · 점수가중 배분)**: `bnf_trading_strategies`에서 사용자의 `enabled=true & budget>0` 전략 목록을 순회. 전략별로:
+브라우저 불필요. 장중(`isKoreanMarketOpen`)에만. **전략 카드(`bnf_trading_strategies`) 단위로 완전히 독립 실행** — `status='RUNNING'`인 카드가 1개 이상 있는 사용자만 처리:
+1. Broker connect (토큰 캐시, 전략 카드들이 공유)
+2. **매도**: `bnf_live_positions`(OPEN) 전체 → 각 포지션의 `strategy_code`로 전략 모듈 조회 → `stepOpen` 트리거 → 시장가 매도 (거래소 매도가능수량 범위 내). 카드가 중지/삭제되어도 기존 보유 포지션은 계속 관리됨.
+3. **매수**: `status='RUNNING' & budget>0`인 카드를 순회. **각 카드는 자기만의 `universe`(스캔대상)·`interval_min`(실행주기, 자체 `last_run_at`으로 스로틀링)·`max_positions`(그 전략코드의 현재 OPEN 포지션 수 기준)·`budget`을 가진 완전 독립 단위**:
    - 잔여예산 = `strategy.budget − Σ(entry_price×shares)` (해당 전략의 현재 OPEN 포지션 투입액)
    - 유니버스(상한 25종목) 스캔 → `buy` 트리거 종목들을 `scan()` 점수(0~100)와 함께 수집
-   - 같은 회차에 잡힌 신호가 여럿이면 잔여예산을 **점수 비중으로 분배**(`alloc = 잔여예산 × score/Σscore`, 실제 계좌현금 상한 적용) 후 각각 시장가 매수 (회당 전체 최대 5건, `max_positions` 슬롯은 전략 공통)
+   - 같은 회차에 잡힌 신호가 여럿이면 잔여예산을 **점수 비중으로 분배**(`alloc = 잔여예산 × score/Σscore`, 실제 계좌현금 상한 적용) 후 각각 시장가 매수 (전체 회당 최대 5건)
+   - 처리 후 해당 카드의 `last_run_at`/`status`(오류 시 `ERROR`+`last_error`)를 개별 기록 — 한 카드의 오류가 다른 카드 처리를 막지 않음(카드별 try/catch)
 4. `bnf_live_trades`(거래이력) + `bnf_trade_logs`(로그) 저장, 텔레그램 알림
-5. 오류 시 status='ERROR' + last_error 저장 + 텔레그램 경고
 
 ### 6.3 웹 API `broker.mts` (`POST /api/broker`, accessToken 검증)
-actions: `save-settings`(키 암호화 저장 + `strategies` 배열을 `bnf_trading_strategies`에 재기록) / `get-settings`(키 마스킹, `strategies` 목록 포함) / `test`(연결+계좌) / `account` / `positions` / `orders` / `force-sell`(강제매도) / `toggle`(시작·중지 — 활성 전략·예산이 하나도 없으면 시작 거부). UI = `TradingPage.tsx`(전략별 예산 입력 테이블).
+actions: `save-settings`(브로커/계좌 필드만, 키 암호화 저장) / `get-settings`(키 마스킹, 전략 카드 전체 목록 `strategies` 포함) / `test`(연결+계좌) / `account` / `positions` / `orders` / `force-sell`(강제매도) / **`save-strategy`**(카드 저장, `id` 있으면 update 없으면 insert) / **`toggle-strategy`**(카드 개별 시작·중지, 시작 시 연결 검증) / **`delete-strategy`**(카드 삭제, 포지션은 유지). UI = `TradingPage.tsx`(전략 카드형 레이아웃 — 카드마다 매매전략·스캔대상·실행주기·최대보유수·예산·시작/중지/저장/삭제).
 
 ---
 
@@ -257,8 +257,8 @@ RLS 전부 활성. 대부분 `user_id = auth.uid() or is_admin()` 정책. 최초
 | `bnf_paper_accounts` / `bnf_paper_positions` | 모의투자 계좌·포지션 |
 | `bnf_user_positions` | 수동 등록 포지션 (`/positions`) |
 | `bnf_admin_config` | 전역 리포트 설정 (단일 행 id=1, config jsonb) |
-| `bnf_trading_settings` | ★ 자동매매 계좌 설정 (broker, mode, 암호화된 키, status, universe, interval, max_positions). `strategy_code`/`budget_pct` 컬럼은 레거시(더 이상 사용 안 함) |
-| `bnf_trading_strategies` | ★ 사용자별 전략별 예산 (strategy_code, budget=원화 절대금액, enabled) — 2개 이상 동시 실행 가능 |
+| `bnf_trading_settings` | ★ 자동매매 **브로커 연결 정보만**(broker, mode, 암호화된 키, 계좌번호, 토큰 캐시). `strategy_code`/`budget_pct`/`universe`/`interval_min`/`max_positions`/`enabled`/`status` 컬럼은 레거시(더 이상 사용 안 함) |
+| `bnf_trading_strategies` | ★ 전략 카드 — id별로 완전 독립(strategy_code, universe, interval_min, max_positions, budget=원화 절대금액, status, last_run_at, last_error). 카드 여러 개 동시 실행 가능, (user_id,strategy_code) 유니크 제약 없음 |
 | `bnf_live_positions` | ★ 자동매매 전략 포지션 상태 (sl/tp1 추적, strategy_code로 각자 전략 귀속) |
 | `bnf_live_trades` | ★ 자동매매 거래이력 (삭제 안 함, CSV 다운로드) |
 | `bnf_trade_logs` | ★ 자동매매 로그 (트리거/주문/응답/오류) |

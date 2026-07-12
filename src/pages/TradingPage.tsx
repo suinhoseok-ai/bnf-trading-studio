@@ -5,10 +5,16 @@ import { supabase } from '../lib/supabase';
 import { UNIVERSE_OPTIONS } from '../lib/marketData';
 import { ALL_STRATEGIES } from '../lib/strategies';
 
-interface StrategyBudget {
+interface StrategyCard {
+  id: number | null;       // 서버 저장 전이면 null
   strategyCode: string;
+  universe: string;
+  intervalMin: number;
+  maxPositions: number;
   budget: number;
-  enabled: boolean;
+  status: string;          // RUNNING | STOPPED | ERROR (미저장 카드는 항상 STOPPED)
+  lastRunAt: string | null;
+  lastError: string;
 }
 
 interface TradeSettings {
@@ -18,38 +24,27 @@ interface TradeSettings {
   accountProductCd: string;
   appKeyMasked?: string;
   appSecretSet?: boolean;
-  enabled?: boolean;
-  status?: string;
-  universe: string;
-  intervalMin: number;
-  maxPositions: number;
-  lastRunAt?: string | null;
-  lastError?: string;
 }
 interface Account { totalAsset: number; cash: number; evalAmount: number; pnl: number; pnlPct: number; positionCount: number }
 interface BrokerPos { symbol: string; name: string; qty: number; sellableQty: number; avgPrice: number; curPrice: number; evalAmount: number; pnl: number; pnlPct: number }
 
 const DEFAULT_SETTINGS: TradeSettings = {
   broker: 'kis', mode: 'paper', accountNo: '', accountProductCd: '01',
-  universe: 'KOSPI', intervalMin: 10, maxPositions: 5,
 };
+
+const newCard = (strategyCode: string): StrategyCard => ({
+  id: null, strategyCode, universe: 'KOSPI', intervalMin: 10, maxPositions: 5, budget: 0,
+  status: 'STOPPED', lastRunAt: null, lastError: '',
+});
 
 export default function TradingPage() {
   const { guestMode, allowedStrategyCodes } = useAuth();
   const [settings, setSettings] = useState<TradeSettings>(DEFAULT_SETTINGS);
   const allowedStrategies = ALL_STRATEGIES.filter((m) => allowedStrategyCodes.includes(m.code));
-  const [strategies, setStrategies] = useState<StrategyBudget[]>(
-    allowedStrategies.map((m) => ({ strategyCode: m.code, budget: 0, enabled: false })),
-  );
-  const setStratField = (code: string, patch: Partial<StrategyBudget>) =>
-    setStrategies((prev) => prev.map((s) => (s.strategyCode === code ? { ...s, ...patch } : s)));
-  const totalBudget = strategies.filter((s) => s.enabled).reduce((sum, s) => sum + (Number(s.budget) || 0), 0);
+  const [strategies, setStrategies] = useState<StrategyCard[]>([]);
   const [appKey, setAppKey] = useState('');
   const [appSecret, setAppSecret] = useState('');
   const [encryption, setEncryption] = useState<boolean | null>(null);
-  const [status, setStatus] = useState('STOPPED');
-  const [lastRunAt, setLastRunAt] = useState<string | null>(null);
-  const [lastError, setLastError] = useState('');
   const [keyMasked, setKeyMasked] = useState('');
   const [account, setAccount] = useState<Account | null>(null);
   const [positions, setPositions] = useState<BrokerPos[]>([]);
@@ -58,6 +53,8 @@ export default function TradingPage() {
 
   const flash = (ok: boolean, text: string) => { setMsg({ ok, text }); setTimeout(() => setMsg(null), 4000); };
   const setF = <K extends keyof TradeSettings>(k: K, v: TradeSettings[K]) => setSettings((p) => ({ ...p, [k]: v }));
+  const setCard = (idx: number, patch: Partial<StrategyCard>) =>
+    setStrategies((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
 
   const api = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
     const { data } = await supabase.auth.getSession();
@@ -79,16 +76,16 @@ export default function TradingPage() {
       setEncryption(j.encryption ?? null);
       if (j.settings) {
         const s = j.settings;
-        setSettings({
-          broker: s.broker, mode: s.mode, accountNo: s.accountNo, accountProductCd: s.accountProductCd,
-          universe: s.universe, intervalMin: s.intervalMin, maxPositions: s.maxPositions,
-        });
-        const saved = new Map<string, StrategyBudget>((s.strategies ?? []).map((st: StrategyBudget) => [st.strategyCode, st]));
-        setStrategies(allowedStrategies.map((m) => saved.get(m.code) ?? { strategyCode: m.code, budget: 0, enabled: false }));
-        setStatus(s.status ?? 'STOPPED');
-        setLastRunAt(s.lastRunAt ?? null);
-        setLastError(s.lastError ?? '');
+        setSettings({ broker: s.broker, mode: s.mode, accountNo: s.accountNo, accountProductCd: s.accountProductCd });
         setKeyMasked(s.appKeyMasked ?? '');
+        setStrategies((s.strategies ?? []).map((st: {
+          id: number; strategyCode: string; universe: string; intervalMin: number; maxPositions: number;
+          budget: number; status: string; lastRunAt: string | null; lastError: string;
+        }) => ({
+          id: st.id, strategyCode: st.strategyCode, universe: st.universe,
+          intervalMin: st.intervalMin, maxPositions: st.maxPositions, budget: st.budget,
+          status: st.status, lastRunAt: st.lastRunAt, lastError: st.lastError,
+        })));
       }
     } catch { /* 함수 미배포(로컬) 등 — 화면은 유지 */ }
   }, [api]);
@@ -102,10 +99,7 @@ export default function TradingPage() {
   };
 
   const saveSettings = () => run('save', async () => {
-    await api('save-settings', {
-      settings: { ...settings, appKey: appKey.trim() || undefined, appSecret: appSecret.trim() || undefined },
-      strategies,
-    });
+    await api('save-settings', { settings: { ...settings, appKey: appKey.trim() || undefined, appSecret: appSecret.trim() || undefined } });
     setAppKey(''); setAppSecret('');
     flash(true, '설정을 저장했습니다.');
     await loadSettings();
@@ -123,15 +117,6 @@ export default function TradingPage() {
     setPositions(p.positions);
   });
 
-  const toggle = (running: boolean) => run('toggle', async () => {
-    if (running && settings.mode === 'real') {
-      if (!confirm('⚠️ 실전투자 모드입니다. 실제 계좌에서 실제 주문이 실행됩니다.\n자동매매를 시작할까요?')) return;
-    }
-    const j = await api('toggle', { running });
-    setStatus(j.status);
-    flash(true, running ? '자동매매를 시작했습니다. 장중 설정 주기마다 서버에서 자동 실행됩니다.' : '자동매매를 중지했습니다.');
-  });
-
   const forceSell = (p: BrokerPos) => run('sell-' + p.symbol, async () => {
     const input = prompt(`${p.name} 강제매도 수량 (보유 ${p.sellableQty}주, 전량은 그대로 확인)`, String(p.sellableQty));
     if (input == null) return;
@@ -143,7 +128,44 @@ export default function TradingPage() {
     await refreshBroker();
   });
 
+  const addStrategy = () => {
+    const used = new Set(strategies.map((s) => s.strategyCode));
+    const code = allowedStrategies.find((m) => !used.has(m.code))?.code ?? allowedStrategies[0]?.code;
+    if (!code) { flash(false, '사용 가능한 전략이 없습니다.'); return; }
+    setStrategies((prev) => [...prev, newCard(code)]);
+  };
+
+  const saveCard = (idx: number) => run(`save-${idx}`, async () => {
+    const c = strategies[idx];
+    const j = await api('save-strategy', {
+      strategy: { id: c.id ?? undefined, strategyCode: c.strategyCode, universe: c.universe, intervalMin: c.intervalMin, maxPositions: c.maxPositions, budget: c.budget },
+    });
+    setCard(idx, { id: j.id });
+    flash(true, '전략을 저장했습니다.');
+  });
+
+  const toggleCard = (idx: number) => run(`toggle-${idx}`, async () => {
+    const c = strategies[idx];
+    if (!c.id) { flash(false, '먼저 [저장]을 눌러 전략을 저장하세요.'); return; }
+    const running = c.status !== 'RUNNING';
+    if (running && settings.mode === 'real') {
+      if (!confirm('⚠️ 실전투자 모드입니다. 실제 계좌에서 실제 주문이 실행됩니다.\n이 전략을 실행할까요?')) return;
+    }
+    const j = await api('toggle-strategy', { id: c.id, running });
+    setCard(idx, { status: j.status, lastError: '' });
+    flash(true, running ? '전략을 실행했습니다.' : '전략을 중지했습니다.');
+  });
+
+  const deleteCard = (idx: number) => run(`delete-${idx}`, async () => {
+    const c = strategies[idx];
+    if (!confirm('이 전략 카드를 삭제할까요? (보유 중인 포지션은 계속 관리됩니다)')) return;
+    if (c.id) await api('delete-strategy', { id: c.id });
+    setStrategies((prev) => prev.filter((_, i) => i !== idx));
+    flash(true, '전략을 삭제했습니다.');
+  });
+
   const fmt = (n: number) => Math.round(n).toLocaleString('ko-KR');
+  const totalBudget = strategies.reduce((sum, s) => sum + (Number(s.budget) || 0), 0);
 
   if (guestMode) {
     return (
@@ -156,7 +178,7 @@ export default function TradingPage() {
     );
   }
 
-  const statusBadge =
+  const cardStatusBadge = (status: string) =>
     status === 'RUNNING' ? <span className="badge bg-profit/20 text-profit">● 실행 중</span>
     : status === 'ERROR' ? <span className="badge bg-red-500/20 text-red-400">● 오류</span>
     : <span className="badge bg-edge text-slate-400">● 중지됨</span>;
@@ -167,128 +189,133 @@ export default function TradingPage() {
         <div>
           <h1 className="text-2xl font-bold text-ink">자동매매 (실거래)</h1>
           <p className="text-sm text-slate-400 mt-1">
-            전략 트리거로만 주문하는 무인 자동매매 — 브라우저를 꺼도 장중 {settings.intervalMin}분 주기로 서버에서 실행됩니다. AI 미사용.
+            전략 트리거로만 주문하는 무인 자동매매 — 브라우저를 꺼도 24시간 서버에서 실행됩니다. AI 미사용. 여러 전략을 동시에 켜서 예산을 나눠 운용할 수 있습니다.
           </p>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          {statusBadge}
-          {status === 'RUNNING' ? (
-            <button className="btn-danger" onClick={() => toggle(false)} disabled={busy !== null}>
-              {busy === 'toggle' ? '처리 중...' : '⏸ 자동매매 중지'}
-            </button>
-          ) : (
-            <button className="btn-primary" onClick={() => toggle(true)} disabled={busy !== null}>
-              {busy === 'toggle' ? '처리 중...' : '▶ 자동매매 시작'}
-            </button>
-          )}
-        </div>
+        <Link to="/trading/history" className="btn-ghost !py-1 !px-3 text-sm">📖 거래이력·로그 →</Link>
       </header>
 
       {msg && <div className={`text-sm rounded-lg p-3 ${msg.ok ? 'bg-profit/10 text-profit' : 'bg-red-500/10 text-red-400'}`}>{msg.text}</div>}
-      {lastError && status === 'ERROR' && (
-        <div className="card bg-red-500/10 border-red-500/40 text-red-300 text-sm">최근 오류: {lastError}</div>
-      )}
-      {lastRunAt && <div className="text-xs text-slate-500">마지막 자동 실행: {new Date(lastRunAt).toLocaleString('ko-KR')}</div>}
 
-      <div className="grid xl:grid-cols-2 gap-4 items-start">
-        {/* ── 브로커 설정 ── */}
-        <div className="card space-y-3">
-          <h2 className="font-bold text-ink">🔌 증권사 연결 설정</h2>
-          <div className="grid md:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">증권사</label>
-              <select className="input w-full" value={settings.broker} onChange={(e) => setF('broker', e.target.value as 'kis' | 'toss')}>
-                <option value="kis">한국투자증권 (KIS Open API)</option>
-                <option value="toss">토스증권 (공개 API 미제공 — 준비됨)</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">투자 모드</label>
-              <select className="input w-full" value={settings.mode} onChange={(e) => setF('mode', e.target.value as 'paper' | 'real')}>
-                <option value="paper">모의투자 (KIS 모의계좌)</option>
-                <option value="real">⚠️ 실전투자 (실제 주문)</option>
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">App Key {keyMasked && <span className="text-slate-500">(저장됨: {keyMasked})</span>}</label>
-              <input className="input w-full" type="password" value={appKey} onChange={(e) => setAppKey(e.target.value)} placeholder={keyMasked ? '변경 시에만 입력' : 'KIS 개발자센터에서 발급'} />
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">App Secret</label>
-              <input className="input w-full" type="password" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder={keyMasked ? '변경 시에만 입력' : 'App Secret'} />
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">계좌번호 (앞 8자리)</label>
-              <input className="input w-full" value={settings.accountNo} onChange={(e) => setF('accountNo', e.target.value)} placeholder="12345678" />
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">계좌상품코드 (뒤 2자리)</label>
-              <input className="input w-full" value={settings.accountProductCd} onChange={(e) => setF('accountProductCd', e.target.value)} placeholder="01" />
-            </div>
-          </div>
-          {encryption === false && (
-            <p className="text-xs text-amber-400">⚠️ 서버에 BROKER_ENC_KEY 환경변수가 없어 API 키가 암호화되지 않습니다. Netlify에 BROKER_ENC_KEY(임의의 긴 문자열)를 추가하는 것을 권장합니다.</p>
-          )}
-          <div className="flex gap-2">
-            <button className="btn-ghost" onClick={testConn} disabled={busy !== null}>{busy === 'test' ? '테스트 중...' : '연결 테스트'}</button>
-            <button className="btn-primary" onClick={saveSettings} disabled={busy !== null}>{busy === 'save' ? '저장 중...' : '저장'}</button>
-          </div>
-        </div>
-
-        {/* ── 자동매매 전략 설정 ── */}
-        <div className="card space-y-3">
-          <h2 className="font-bold text-ink">⚙️ 자동매매 규칙</h2>
-          <div className="grid md:grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">매수 스캔 대상</label>
-              <select className="input w-full" value={settings.universe} onChange={(e) => setF('universe', e.target.value)}>
-                {UNIVERSE_OPTIONS.filter((u) => u.key !== 'WATCH').map((u) => <option key={u.key} value={u.key}>{u.label}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">실행 주기 (분, 최소 10)</label>
-              <input className="input w-full" type="number" min={10} step={5} value={settings.intervalMin} onChange={(e) => setF('intervalMin', Math.max(10, Number(e.target.value)))} />
-            </div>
-            <div>
-              <label className="text-xs text-slate-400 block mb-1">최대 보유 종목 수 (전체 전략 합산)</label>
-              <input className="input w-full" type="number" min={1} max={20} value={settings.maxPositions} onChange={(e) => setF('maxPositions', Number(e.target.value))} />
-            </div>
-          </div>
-
+      {/* ── 거래소 연결 설정 ── */}
+      <div className="card space-y-3">
+        <h2 className="font-bold text-ink">🔌 거래소 연결 설정 (계정당 1개)</h2>
+        <div className="grid md:grid-cols-2 gap-3">
           <div>
-            <label className="text-xs text-slate-400 block mb-1">전략별 자동매매 예산 (2개 이상 동시 실행 가능)</label>
-            <div className="space-y-2">
-              {strategies.map((s) => {
-                const mod = allowedStrategies.find((m) => m.code === s.strategyCode);
-                if (!mod) return null;
-                return (
-                  <div key={s.strategyCode} className="flex items-center gap-2 bg-base rounded-lg p-2">
-                    <input
-                      type="checkbox" checked={s.enabled}
-                      onChange={(e) => setStratField(s.strategyCode, { enabled: e.target.checked })}
-                    />
-                    <span className="text-sm text-ink flex-1 truncate" title={mod.name}>{mod.name}</span>
-                    <input
-                      className="input !w-32 text-right" type="number" min={0} step={10000}
-                      value={s.budget} disabled={!s.enabled}
-                      onChange={(e) => setStratField(s.strategyCode, { budget: Math.max(0, Number(e.target.value)) })}
-                      placeholder="예산(원)"
-                    />
-                    <span className="text-xs text-slate-500 w-4">원</span>
-                  </div>
-                );
-              })}
-              {strategies.length === 0 && <p className="text-sm text-slate-500">사용 가능한 전략이 없습니다. 관리자에게 전략 권한을 요청하세요.</p>}
-            </div>
-            <p className="text-xs text-slate-400 mt-2">총 배정 예산: <span className="text-ink font-semibold">{fmt(totalBudget)}원</span></p>
+            <label className="text-xs text-slate-400 block mb-1">증권사</label>
+            <select className="input w-full" value={settings.broker} onChange={(e) => setF('broker', e.target.value as 'kis' | 'toss')}>
+              <option value="kis">한국투자증권 (KIS Open API)</option>
+              <option value="toss">토스증권 (공개 API 미제공 — 준비됨)</option>
+            </select>
           </div>
-
-          <p className="text-xs text-slate-500 leading-relaxed">
-            장중(평일 09:00~15:30) 서버 스케줄러가 설정 주기마다: ① 보유 포지션의 전략 매도 트리거 검사 → 시장가 매도,
-            ② 전략별로 유니버스 매수 트리거 검사 → 전략 예산(보유 중인 금액 차감한 잔여분)을 매수신호 종목들의 점수(추천도) 비중으로 배분해 시장가 매수.
-            체결 시 텔레그램으로 알립니다(설정 페이지 연동 필요).
-          </p>
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">투자 모드</label>
+            <select className="input w-full" value={settings.mode} onChange={(e) => setF('mode', e.target.value as 'paper' | 'real')}>
+              <option value="paper">모의투자 (KIS 모의계좌)</option>
+              <option value="real">⚠️ 실전투자 (실제 주문)</option>
+            </select>
+          </div>
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">App Key {keyMasked && <span className="text-slate-500">(저장됨: {keyMasked})</span>}</label>
+            <input className="input w-full" type="password" value={appKey} onChange={(e) => setAppKey(e.target.value)} placeholder={keyMasked ? '변경 시에만 입력' : 'KIS 개발자센터에서 발급'} />
+          </div>
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">Secret Key</label>
+            <input className="input w-full" type="password" value={appSecret} onChange={(e) => setAppSecret(e.target.value)} placeholder={keyMasked ? '변경 시에만 입력' : 'App Secret'} />
+          </div>
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">계좌번호 (앞 8자리)</label>
+            <input className="input w-full" value={settings.accountNo} onChange={(e) => setF('accountNo', e.target.value)} placeholder="12345678" />
+          </div>
+          <div>
+            <label className="text-xs text-slate-400 block mb-1">계좌상품코드 (뒤 2자리)</label>
+            <input className="input w-full" value={settings.accountProductCd} onChange={(e) => setF('accountProductCd', e.target.value)} placeholder="01" />
+          </div>
         </div>
+        {encryption === false && (
+          <p className="text-xs text-amber-400">⚠️ 서버에 BROKER_ENC_KEY 환경변수가 없어 API 키가 암호화되지 않습니다. Netlify에 BROKER_ENC_KEY(임의의 긴 문자열)를 추가하는 것을 권장합니다.</p>
+        )}
+        <div className="flex gap-2">
+          <button className="btn-ghost" onClick={testConn} disabled={busy !== null}>{busy === 'test' ? '테스트 중...' : '연결 테스트'}</button>
+          <button className="btn-primary" onClick={saveSettings} disabled={busy !== null}>{busy === 'save' ? '저장 중...' : '저장'}</button>
+        </div>
+      </div>
+
+      {/* ── 자동매매 전략 (카드형, 여러 개 동시 운용) ── */}
+      <div className="card space-y-3">
+        <div className="flex items-center justify-between flex-wrap gap-2">
+          <h2 className="font-bold text-ink">⚙️ 자동매매 전략 (여러 개 동시 운용 가능)</h2>
+          <div className="flex items-center gap-3">
+            <span className="text-xs text-slate-400">예산 합계: <span className="text-ink font-semibold">{fmt(totalBudget)}원</span></span>
+            <button className="btn-primary !py-1 !px-3 text-sm" onClick={addStrategy}>+ 전략 추가</button>
+          </div>
+        </div>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          예산(원)은 각 전략에 고정 배정된 금액입니다(예: 전략A 10만원 + 전략B 20만원 = 항상 최대 30만원까지만 동시 사용). 한 사이클에 여러 종목이 동시에 매수 신호를 내면, 이 예산은 점수(추천도)가 높은 종목일수록 더 많이 배분해서 나눠 삽니다.
+          보유 중인 포지션을 매도하면 그만큼 예산이 자동으로 재확보되어 다음 매수에 쓰입니다. 같은 종목을 두 전략이 동시에 사지는 않습니다. 24시간 서버가 전략별 실행주기마다: ① 보유 포지션 매도 트리거 검사 → 시장가 매도, ② 전략 유니버스 매수 트리거 검사 → 배정 예산 내에서 시장가 매수. 체결 시 텔레그램으로 알립니다(설정 페이지 연동 필요).
+        </p>
+
+        {strategies.length === 0 && (
+          <p className="text-sm text-slate-500">등록된 전략이 없습니다. [+ 전략 추가]로 시작하세요.</p>
+        )}
+
+        {strategies.map((c, idx) => {
+          const usedByOthers = new Set(strategies.filter((_, i) => i !== idx).map((s) => s.strategyCode));
+          const options = allowedStrategies.filter((m) => m.code === c.strategyCode || !usedByOthers.has(m.code));
+          return (
+            <div key={idx} className="rounded-xl border border-edge p-4 space-y-3 bg-base">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-bold text-ink">전략{idx + 1}</span>
+                  {cardStatusBadge(c.status)}
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    className={c.status === 'RUNNING' ? 'btn-danger !py-1 !px-3 text-sm' : 'btn-primary !py-1 !px-3 text-sm'}
+                    onClick={() => toggleCard(idx)} disabled={busy !== null}
+                  >
+                    {busy === `toggle-${idx}` ? '처리 중...' : c.status === 'RUNNING' ? '⏸ 중지' : '▶ 실행'}
+                  </button>
+                  <button className="btn-ghost !py-1 !px-3 text-sm" onClick={() => saveCard(idx)} disabled={busy !== null}>
+                    {busy === `save-${idx}` ? '저장 중...' : '저장'}
+                  </button>
+                  <button className="text-red-400 hover:underline text-sm" onClick={() => deleteCard(idx)} disabled={busy !== null}>
+                    {busy === `delete-${idx}` ? '삭제 중...' : '삭제'}
+                  </button>
+                </div>
+              </div>
+              {c.lastRunAt && <div className="text-xs text-slate-500">마지막 실행: {new Date(c.lastRunAt).toLocaleString('ko-KR')}</div>}
+              {c.lastError && c.status === 'ERROR' && <div className="text-xs text-red-400">최근 오류: {c.lastError}</div>}
+
+              <div className="grid md:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">매매 전략</label>
+                  <select className="input w-full" value={c.strategyCode} onChange={(e) => setCard(idx, { strategyCode: e.target.value })}>
+                    {options.map((m) => <option key={m.code} value={m.code}>{m.name}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">매수 스캔 대상</label>
+                  <select className="input w-full" value={c.universe} onChange={(e) => setCard(idx, { universe: e.target.value })}>
+                    {UNIVERSE_OPTIONS.filter((u) => u.key !== 'WATCH').map((u) => <option key={u.key} value={u.key}>{u.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">실행 주기 (분, 최소 10)</label>
+                  <input className="input w-full" type="number" min={10} step={5} value={c.intervalMin} onChange={(e) => setCard(idx, { intervalMin: Math.max(10, Number(e.target.value)) })} />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">최대 보유 종목 수</label>
+                  <input className="input w-full" type="number" min={1} max={20} value={c.maxPositions} onChange={(e) => setCard(idx, { maxPositions: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-400 block mb-1">예산 (고정 금액, 원)</label>
+                  <input className="input w-full" type="number" min={0} step={10000} value={c.budget} onChange={(e) => setCard(idx, { budget: Math.max(0, Number(e.target.value)) })} />
+                </div>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       {/* ── 계좌 현황 ── */}
@@ -318,7 +345,7 @@ export default function TradingPage() {
         <table className="w-full whitespace-nowrap">
           <thead>
             <tr className="border-b border-edge">
-              <th className="th">종목</th><th className="th">수량</th><th className="th">평균단가</th><th className="th">현재가</th>
+              <th className="th">종목</th><th className="th">수량</th><th className="th">평균매수가</th><th className="th">현재가</th>
               <th className="th">평가금액</th><th className="th">평가손익</th><th className="th">수익률</th><th className="th">액션</th>
             </tr>
           </thead>
@@ -343,15 +370,6 @@ export default function TradingPage() {
           </tbody>
         </table>
       </div>
-
-      {/* ── 거래이력·로그 바로가기 ── */}
-      <Link to="/trading/history" className="card flex items-center justify-between hover:border-accent transition-colors">
-        <div>
-          <h2 className="font-bold text-ink">📜 거래이력 · 로그</h2>
-          <p className="text-sm text-slate-400 mt-1">자동매매 대시보드 · 거래 이력 · 실행 로그를 기간별로 조회합니다.</p>
-        </div>
-        <span className="text-accent">보러가기 →</span>
-      </Link>
 
       <div className="card text-xs text-slate-500 leading-relaxed">
         <div className="font-bold text-slate-400 mb-1">유의사항</div>

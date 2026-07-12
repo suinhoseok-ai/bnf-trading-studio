@@ -226,11 +226,24 @@ create table if not exists public.bnf_trading_strategies (
   user_id uuid not null references public.bnf_profiles(id) on delete cascade,
   strategy_code text not null,
   budget numeric not null default 0,      -- 전략별 총 투자한도 (원화 절대금액)
-  enabled boolean not null default true,
+  enabled boolean not null default true,  -- 레거시(더 이상 사용 안 함, status로 대체)
+  universe text not null default 'KOSPI',
+  interval_min int not null default 10,
+  max_positions int not null default 5,
+  status text not null default 'STOPPED' check (status in ('RUNNING', 'STOPPED', 'ERROR')),
+  last_run_at timestamptz,
+  last_error text default '',
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now(),
-  unique (user_id, strategy_code)
+  updated_at timestamptz not null default now()
 );
+-- 카드마다 매매 전략을 자유롭게 바꿀 수 있도록 (user_id, strategy_code) 유니크 제약은 사용하지 않음
+alter table public.bnf_trading_strategies drop constraint if exists bnf_trading_strategies_user_id_strategy_code_key;
+alter table public.bnf_trading_strategies add column if not exists universe text not null default 'KOSPI';
+alter table public.bnf_trading_strategies add column if not exists interval_min int not null default 10;
+alter table public.bnf_trading_strategies add column if not exists max_positions int not null default 5;
+alter table public.bnf_trading_strategies add column if not exists status text not null default 'STOPPED';
+alter table public.bnf_trading_strategies add column if not exists last_run_at timestamptz;
+alter table public.bnf_trading_strategies add column if not exists last_error text default '';
 
 -- 자동매매 전략 포지션 상태 (전략 청산 로직용 — 실계좌 잔고와 별개로 sl/tp1 상태 추적)
 create table if not exists public.bnf_live_positions (

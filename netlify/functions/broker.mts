@@ -8,7 +8,9 @@
 //   positions      거래소 보유 포지션
 //   orders         최근 주문 내역
 //   force-sell     강제매도 { symbol, qty(0=전량), price(0=시장가) }
-//   toggle         자동매매 시작/중지 { running }
+//   save-strategy  전략 카드 저장 { id?, strategyCode, universe, intervalMin, maxPositions, budget }
+//   toggle-strategy 전략 카드 시작/중지 { id, running }
+//   delete-strategy 전략 카드 삭제 { id }
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { getAdapter, encryptSecret, decryptSecret, maskKey, encryptionEnabled, BrokerCredentials, TokenCache } from '../../src/lib/broker';
 
@@ -97,27 +99,16 @@ export default async (req: Request) => {
         const { error } = await sb.from('bnf_trading_settings').upsert(row);
         if (error) return json({ ok: false, error: error.message }, 500);
 
-        // 전략별 예산 (다중 전략 — 기존 목록 전체 재기록)
-        const strategies = Array.isArray(body.strategies) ? (body.strategies as Record<string, unknown>[]) : [];
-        await sb.from('bnf_trading_strategies').delete().eq('user_id', uid);
-        const stratRows = strategies
-          .map((st) => ({
-            user_id: uid,
-            strategy_code: String(st.strategyCode ?? ''),
-            budget: Math.max(0, Number(st.budget) || 0),
-            enabled: !!st.enabled,
-          }))
-          .filter((st) => st.strategy_code && st.enabled && st.budget > 0);
-        if (stratRows.length > 0) await sb.from('bnf_trading_strategies').insert(stratRows);
-
-        await log(sb, uid, 'info', '설정 저장', `${row.broker}/${row.mode} 전략 ${stratRows.length}개`);
+        await log(sb, uid, 'info', '설정 저장', `${row.broker}/${row.mode}`);
         return json({ ok: true, encryption: encryptionEnabled() });
       }
 
       case 'get-settings': {
         const row = await loadSettings();
         if (!row) return json({ ok: true, settings: null, encryption: encryptionEnabled() });
-        const { data: strategies } = await sb.from('bnf_trading_strategies').select('strategy_code, budget, enabled').eq('user_id', uid);
+        const { data: strategies } = await sb.from('bnf_trading_strategies')
+          .select('id, strategy_code, universe, interval_min, max_positions, budget, status, last_run_at, last_error')
+          .eq('user_id', uid).order('id', { ascending: true });
         return json({
           ok: true,
           encryption: encryptionEnabled(),
@@ -125,11 +116,11 @@ export default async (req: Request) => {
             broker: row.broker, mode: row.mode,
             accountNo: row.account_no, accountProductCd: row.account_product_cd,
             appKeyMasked: maskKey(row.app_key), appSecretSet: !!row.app_secret,
-            enabled: row.enabled, status: row.status,
-            universe: row.universe,
-            intervalMin: row.interval_min, maxPositions: row.max_positions,
-            strategies: (strategies ?? []).map((s) => ({ strategyCode: s.strategy_code, budget: Number(s.budget), enabled: s.enabled })),
-            lastRunAt: row.last_run_at, lastError: row.last_error,
+            strategies: (strategies ?? []).map((s) => ({
+              id: s.id, strategyCode: s.strategy_code, universe: s.universe,
+              intervalMin: s.interval_min, maxPositions: s.max_positions, budget: Number(s.budget),
+              status: s.status, lastRunAt: s.last_run_at, lastError: s.last_error,
+            })),
           },
         });
       }
@@ -194,25 +185,58 @@ export default async (req: Request) => {
         return json(r.ok ? { ok: true, orderNo: r.orderNo } : { ok: false, error: r.message }, r.ok ? 200 : 502);
       }
 
-      case 'toggle': {
+      case 'save-strategy': {
+        const s = (body.strategy ?? {}) as Record<string, unknown>;
+        const strategyCode = String(s.strategyCode ?? '');
+        if (!strategyCode) return json({ ok: false, error: '매매 전략을 선택하세요.' }, 400);
+        const row: Record<string, unknown> = {
+          user_id: uid,
+          strategy_code: strategyCode,
+          universe: String(s.universe ?? 'KOSPI'),
+          interval_min: Math.max(10, Number(s.intervalMin) || 10),
+          max_positions: Math.min(20, Math.max(1, Number(s.maxPositions) || 5)),
+          budget: Math.max(0, Number(s.budget) || 0),
+          updated_at: new Date().toISOString(),
+        };
+        const id = s.id != null ? Number(s.id) : null;
+        if (id) {
+          const { error } = await sb.from('bnf_trading_strategies').update(row).eq('id', id).eq('user_id', uid);
+          if (error) return json({ ok: false, error: error.message }, 500);
+          await log(sb, uid, 'info', '전략 저장', `${strategyCode} (id ${id})`);
+          return json({ ok: true, id });
+        }
+        const { data, error } = await sb.from('bnf_trading_strategies').insert(row).select('id').single();
+        if (error) return json({ ok: false, error: error.message }, 500);
+        await log(sb, uid, 'info', '전략 추가', strategyCode);
+        return json({ ok: true, id: data.id });
+      }
+
+      case 'toggle-strategy': {
+        const id = Number(body.id);
         const running = !!body.running;
-        const row = await loadSettings();
-        if (!row) return json({ ok: false, error: '설정을 먼저 저장하세요.' }, 400);
-        let stratCount = 0;
+        if (!id) return json({ ok: false, error: '전략을 먼저 저장하세요.' }, 400);
+        const { data: strat } = await sb.from('bnf_trading_strategies').select('*').eq('id', id).eq('user_id', uid).maybeSingle();
+        if (!strat) return json({ ok: false, error: '전략을 찾을 수 없습니다.' }, 400);
         if (running) {
-          const { count } = await sb.from('bnf_trading_strategies')
-            .select('id', { count: 'exact', head: true }).eq('user_id', uid).eq('enabled', true).gt('budget', 0);
-          stratCount = count ?? 0;
-          if (stratCount === 0) return json({ ok: false, error: '실행할 전략과 예산이 설정되지 않았습니다. 전략별 예산을 먼저 저장하세요.' }, 400);
-          // 시작 전 연결 검증
-          const adapter = await makeAdapter(sb, row);
+          if (Number(strat.budget) <= 0) return json({ ok: false, error: '예산을 먼저 설정하세요.' }, 400);
+          const settingsRow = await loadSettings();
+          if (!settingsRow) return json({ ok: false, error: '거래소 연결 설정을 먼저 저장하세요.' }, 400);
+          const adapter = await makeAdapter(sb, settingsRow); // 시작 전 연결 검증
           await adapter.getAccount();
         }
-        await sb.from('bnf_trading_settings').update({
-          enabled: running, status: running ? 'RUNNING' : 'STOPPED', last_error: '', updated_at: new Date().toISOString(),
-        }).eq('user_id', uid);
-        await log(sb, uid, 'info', running ? '자동매매 시작' : '자동매매 중지', `${row.broker}/${row.mode} 전략 ${stratCount}개`);
+        await sb.from('bnf_trading_strategies').update({
+          status: running ? 'RUNNING' : 'STOPPED', last_error: '', updated_at: new Date().toISOString(),
+        }).eq('id', id).eq('user_id', uid);
+        await log(sb, uid, 'info', running ? '전략 실행' : '전략 중지', `${strat.strategy_code} (id ${id})`);
         return json({ ok: true, status: running ? 'RUNNING' : 'STOPPED' });
+      }
+
+      case 'delete-strategy': {
+        const id = Number(body.id);
+        if (!id) return json({ ok: false, error: 'id 필요' }, 400);
+        await sb.from('bnf_trading_strategies').delete().eq('id', id).eq('user_id', uid);
+        await log(sb, uid, 'info', '전략 삭제', `id ${id}`);
+        return json({ ok: true });
       }
 
       default:
