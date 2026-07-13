@@ -65,6 +65,8 @@ export interface BrokerAdapter {
   connect(): Promise<void>;
   getAccount(): Promise<AccountSummary>;
   getPositions(): Promise<BrokerPosition[]>;
+  /** 계좌 요약 + 보유 포지션을 단일 API 호출로 함께 조회 (KIS는 동일 엔드포인트라 요청수 절감 목적) */
+  getBalance(): Promise<{ account: AccountSummary; positions: BrokerPosition[] }>;
   getOrders(days?: number): Promise<OrderRecord[]>;
   getMarketPrice(symbol: string): Promise<number>;
   /** price 미지정(0) 시 시장가 */

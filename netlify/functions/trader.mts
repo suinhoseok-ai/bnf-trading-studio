@@ -28,6 +28,24 @@ const BATCH = 6;
 
 const YAHOO_HOSTS = ['https://query1.finance.yahoo.com', 'https://query2.finance.yahoo.com'];
 
+/** KIS API rate limit(초당 거래건수 초과) 대응: 지수 백오프 재시도 */
+async function withKisRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const isRateLimit = msg.includes('초당 거래건수') || msg.includes('429') || msg.includes('Too Many');
+      if (isRateLimit && i < maxRetries - 1) {
+        await new Promise((r) => setTimeout(r, (i + 1) * 800));
+        continue;
+      }
+      throw e;
+    }
+  }
+  throw new Error('Max retries exceeded');
+}
+
 async function fetchCandlesServer(symbol: string, interval: string, range: string): Promise<Candle[]> {
   let lastErr: unknown;
   for (const host of YAHOO_HOSTS) {
@@ -135,8 +153,11 @@ export default async () => {
       const strategies = (stratRows ?? []) as StrategyRow[];
 
       // ── 1. 매도 트리거 (보유 전략 포지션) ──
+      // 계좌 요약 + 보유 포지션을 단일 API 호출로 함께 조회 (KIS 초당 요청수 제한 대응)
       const { data: openPos } = await sb.from('bnf_live_positions').select('*').eq('user_id', uid).eq('status', 'OPEN');
-      const brokerPositions = await adapter.getPositions();
+      const balance = await withKisRetry(() => adapter.getBalance());
+      const brokerPositions = balance.positions;
+      const account = balance.account;
       const brokerQty = new Map(brokerPositions.map((p) => [p.symbol, p.sellableQty]));
 
       for (const pos of openPos ?? []) {
@@ -165,7 +186,7 @@ export default async () => {
               await log('warn', '매도 스킵', `${p.name}: 거래소 매도가능수량 부족 (전략 ${Math.floor(ev.shares)}주 vs 보유 ${held}주)`);
               continue;
             }
-            const r = await adapter.placeSellOrder(p.symbol, qty, 0); // 시장가
+            const r = await withKisRetry(() => adapter.placeSellOrder(p.symbol, qty, 0)); // 시장가
             const estPnl = qty * (last.close - Number(p.entry_price));
             await sb.from('bnf_live_trades').insert({
               user_id: uid, broker: raw.broker, mode: raw.mode, symbol: p.symbol, name: p.name,
@@ -192,7 +213,6 @@ export default async () => {
 
       // ── 2. 매수 트리거 (전략 카드별 완전 독립 실행: 자기 주기·유니버스·최대보유수·예산) ──
       let buys = 0;
-      let account: { cash: number } | null = null;
       const heldSymbols = new Set([
         ...brokerPositions.map((p) => p.symbol),
         ...(openPos ?? []).map((p) => toKrCode((p as { symbol: string }).symbol)),
@@ -221,7 +241,6 @@ export default async () => {
           if (slots <= 0 || remainingBudget < 1) {
             await stratLog('info', '매수 스킵', `${mod.name}: ${slots <= 0 ? '최대 보유 종목 수 도달' : `전략 예산 소진 (예산 ${Math.round(strat.budget).toLocaleString('ko-KR')}원, 투입 ${Math.round(invested).toLocaleString('ko-KR')}원)`}`);
           } else {
-            if (!account) account = await adapter.getAccount();
             let cash = account.cash;
             const stocks = universeStocks(strat.universe || 'KOSPI').slice(0, UNIVERSE_CAP);
 
@@ -256,7 +275,7 @@ export default async () => {
                 const qty = Math.floor(alloc / lastRow.close);
                 if (qty < 1) { await stratLog('warn', '매수 스킵', `${sig.name}: 배분 예산 부족 (배분액 ${Math.round(alloc).toLocaleString('ko-KR')}원 < 1주, 점수 ${sig.score}·★${starsFromScore(sig.score)})`); continue; }
 
-                const r = await adapter.placeBuyOrder(sig.symbol, qty, 0); // 시장가
+                const r = await withKisRetry(() => adapter.placeBuyOrder(sig.symbol, qty, 0)); // 시장가
                 await sb.from('bnf_live_trades').insert({
                   user_id: uid, broker: raw.broker, mode: raw.mode, symbol: sig.symbol, name: sig.name,
                   strategy_code: mod.code, side: 'BUY', trigger_note: plan.note,

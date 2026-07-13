@@ -24,6 +24,7 @@ export class TossAdapter implements BrokerAdapter {
   async connect(): Promise<void> { throw new BrokerError(NOT_SUPPORTED); }
   async getAccount(): Promise<AccountSummary> { throw new BrokerError(NOT_SUPPORTED); }
   async getPositions(): Promise<BrokerPosition[]> { throw new BrokerError(NOT_SUPPORTED); }
+  async getBalance(): Promise<{ account: AccountSummary; positions: BrokerPosition[] }> { throw new BrokerError(NOT_SUPPORTED); }
   async getOrders(): Promise<OrderRecord[]> { throw new BrokerError(NOT_SUPPORTED); }
   async getMarketPrice(): Promise<number> { throw new BrokerError(NOT_SUPPORTED); }
   async placeBuyOrder(): Promise<PlaceOrderResult> { throw new BrokerError(NOT_SUPPORTED); }

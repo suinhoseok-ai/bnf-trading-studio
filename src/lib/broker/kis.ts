@@ -98,27 +98,14 @@ export class KISAdapter implements BrokerAdapter {
     };
   }
 
-  async getAccount(): Promise<AccountSummary> {
-    const j = await this.get('/uapi/domestic-stock/v1/trading/inquire-balance', TR.balance[this.creds.mode], this.balanceParams());
-    const o2 = Array.isArray(j.output2) ? j.output2[0] ?? {} : j.output2 ?? {};
-    const positions = (j.output1 ?? []).filter((p: Record<string, unknown>) => n(p.hldg_qty) > 0);
-    const totalAsset = n(o2.tot_evlu_amt);
-    const cash = n(o2.dnca_tot_amt);
-    const evalAmount = n(o2.scts_evlu_amt) || n(o2.evlu_amt_smtl_amt);
-    const pnl = n(o2.evlu_pfls_smtl_amt);
-    const purchase = n(o2.pchs_amt_smtl_amt);
-    return {
-      totalAsset, cash, evalAmount, pnl,
-      pnlPct: purchase > 0 ? (pnl / purchase) * 100 : 0,
-      positionCount: positions.length,
-    };
-  }
-
-  async getPositions(): Promise<BrokerPosition[]> {
-    const j = await this.get('/uapi/domestic-stock/v1/trading/inquire-balance', TR.balance[this.creds.mode], this.balanceParams());
-    return (j.output1 ?? [])
-      .filter((p: Record<string, unknown>) => n(p.hldg_qty) > 0)
-      .map((p: Record<string, unknown>) => ({
+  /** 계좌 요약(output2) + 보유 포지션(output1)을 동일 응답에서 함께 파싱 */
+  private parseBalance(j: Record<string, unknown>): { account: AccountSummary; positions: BrokerPosition[] } {
+    const output2 = j.output2 as unknown;
+    const o2 = (Array.isArray(output2) ? output2[0] ?? {} : output2 ?? {}) as Record<string, unknown>;
+    const rawPositions = (j.output1 as Record<string, unknown>[] | undefined) ?? [];
+    const positions: BrokerPosition[] = rawPositions
+      .filter((p) => n(p.hldg_qty) > 0)
+      .map((p) => ({
         symbol: String(p.pdno ?? ''),
         name: String(p.prdt_name ?? ''),
         qty: n(p.hldg_qty),
@@ -129,6 +116,30 @@ export class KISAdapter implements BrokerAdapter {
         pnl: n(p.evlu_pfls_amt),
         pnlPct: n(p.evlu_pfls_rt),
       }));
+    const totalAsset = n(o2.tot_evlu_amt);
+    const cash = n(o2.dnca_tot_amt);
+    const evalAmount = n(o2.scts_evlu_amt) || n(o2.evlu_amt_smtl_amt);
+    const pnl = n(o2.evlu_pfls_smtl_amt);
+    const purchase = n(o2.pchs_amt_smtl_amt);
+    const account: AccountSummary = {
+      totalAsset, cash, evalAmount, pnl,
+      pnlPct: purchase > 0 ? (pnl / purchase) * 100 : 0,
+      positionCount: positions.length,
+    };
+    return { account, positions };
+  }
+
+  async getBalance(): Promise<{ account: AccountSummary; positions: BrokerPosition[] }> {
+    const j = await this.get('/uapi/domestic-stock/v1/trading/inquire-balance', TR.balance[this.creds.mode], this.balanceParams());
+    return this.parseBalance(j);
+  }
+
+  async getAccount(): Promise<AccountSummary> {
+    return (await this.getBalance()).account;
+  }
+
+  async getPositions(): Promise<BrokerPosition[]> {
+    return (await this.getBalance()).positions;
   }
 
   async getOrders(days = 7): Promise<OrderRecord[]> {
