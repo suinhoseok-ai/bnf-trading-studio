@@ -101,8 +101,15 @@ export default async () => {
   if (!url || !key) { console.log('[trader] env 미설정'); return new Response('skip: env'); }
   const sb = createClient(url, key, { auth: { persistSession: false } });
 
+  // 처리 대상 = RUNNING 전략이 있는 사용자 ∪ 보유 포지션이 있는 사용자.
+  // 전략이 ERROR/STOPPED 상태가 되어도 이미 열린 포지션의 손절/익절 매도 감시는 계속되어야 하므로
+  // 매도 로직 진입 여부를 전략 실행상태에 의존하지 않게 한다.
   const { data: activeStrats } = await sb.from('bnf_trading_strategies').select('user_id').eq('status', 'RUNNING');
-  const uids = [...new Set((activeStrats ?? []).map((s) => s.user_id as string))];
+  const { data: openPosUsers } = await sb.from('bnf_live_positions').select('user_id').eq('status', 'OPEN');
+  const uids = [...new Set([
+    ...(activeStrats ?? []).map((s) => s.user_id as string),
+    ...(openPosUsers ?? []).map((p) => p.user_id as string),
+  ])];
   if (!uids.length) return new Response('skip: no active traders');
 
   const now = Date.now();
