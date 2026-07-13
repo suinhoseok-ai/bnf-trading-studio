@@ -156,7 +156,7 @@ export async function fetchCandles(
 ): Promise<{ candles: Candle[]; demo: boolean }> {
   const key = `${symbol}|${interval}|${range}`;
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL) return { candles: hit.data, demo: false };
+  if (hit && Date.now() - hit.at < CACHE_TTL && hit.data.length >= 10) return { candles: hit.data, demo: false };
 
   try {
     const url = `/api/yahoo/v8/finance/chart/${encodeURIComponent(symbol)}?interval=${interval}&range=${range}&includePrePost=false`;
@@ -174,7 +174,7 @@ export async function fetchCandles(
       if (o == null || h == null || l == null || c == null) continue;
       candles.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: q.volume?.[i] ?? 0 });
     }
-    if (candles.length < 30) throw new Error('insufficient data');
+    if (candles.length < 2) throw new Error('insufficient data');
     cache.set(key, { at: Date.now(), data: candles });
     return { candles, demo: false };
   } catch (e) {
