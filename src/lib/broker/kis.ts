@@ -41,9 +41,10 @@ export class KISAdapter implements BrokerAdapter {
     this.token = tokenCache ?? {};
   }
 
-  async connect(): Promise<void> {
+  /** force=true면 캐시 유효기간과 무관하게 새 토큰을 발급받는다 (서버측 조기 무효화 대응) */
+  async connect(force = false): Promise<void> {
     // 캐시 토큰이 10분 이상 남아 있으면 재사용
-    if (this.token.access_token && (this.token.expires_at ?? 0) - Date.now() > 10 * 60_000) return;
+    if (!force && this.token.access_token && (this.token.expires_at ?? 0) - Date.now() > 10 * 60_000) return;
     const res = await fetch(`${this.base}/oauth2/tokenP`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -57,6 +58,13 @@ export class KISAdapter implements BrokerAdapter {
     await this.persistToken(this.token);
   }
 
+  /** KIS가 "토큰 만료/유효하지 않음"으로 응답했는지 판별 (캐시된 만료시각과 무관하게 서버가 조기 무효화한 경우) */
+  private isTokenInvalid(j: Record<string, unknown>): boolean {
+    const code = String(j.msg_cd ?? '');
+    const msg = String(j.msg1 ?? '');
+    return code === 'EGW00121' || code === 'EGW00123' || (msg.includes('token') || msg.includes('토큰')) && (msg.includes('만료') || msg.includes('유효하지'));
+  }
+
   private headers(trId: string): Record<string, string> {
     return {
       'Content-Type': 'application/json; charset=utf-8',
@@ -68,22 +76,30 @@ export class KISAdapter implements BrokerAdapter {
     };
   }
 
-  private async get(path: string, trId: string, params: Record<string, string>) {
+  private async get(path: string, trId: string, params: Record<string, string>, retried = false): Promise<any> {
     const qs = new URLSearchParams(params).toString();
     const res = await fetch(`${this.base}${path}?${qs}`, { headers: this.headers(trId) });
     const j = await res.json().catch(() => ({}));
+    if (!retried && this.isTokenInvalid(j)) {
+      await this.connect(true);
+      return this.get(path, trId, params, true);
+    }
     if (!res.ok) throw new BrokerError(`KIS ${path} HTTP ${res.status}: ${j.msg1 ?? ''}`);
     if (j.rt_cd !== undefined && j.rt_cd !== '0') throw new BrokerError(`KIS ${path}: ${j.msg1 ?? j.msg_cd ?? 'rt_cd=' + j.rt_cd}`);
     return j;
   }
 
-  private async post(path: string, trId: string, body: Record<string, string>) {
+  private async post(path: string, trId: string, body: Record<string, string>, retried = false): Promise<any> {
     const res = await fetch(`${this.base}${path}`, {
       method: 'POST',
       headers: this.headers(trId),
       body: JSON.stringify(body),
     });
     const j = await res.json().catch(() => ({}));
+    if (!retried && this.isTokenInvalid(j)) {
+      await this.connect(true);
+      return this.post(path, trId, body, true);
+    }
     if (!res.ok) throw new BrokerError(`KIS ${path} HTTP ${res.status}: ${j.msg1 ?? ''}`);
     return j;
   }
