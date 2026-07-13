@@ -4,7 +4,7 @@ import { calcIndicators } from '../indicators';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
 import { calcShares, starsFromScore } from './engine';
 
-const PARAMS = { period: 20, stddev: 2, bwLookback: 100, bwPercentile: 25, riskReward: 2, positionPct: 10 };
+const PARAMS = { period: 20, stddev: 2, bwLookback: 100, bwPercentile: 25, riskReward: 2, positionPct: 10, minExpectedReturnPct: 0.8 };
 
 function compute(candles: Candle[]): StratRow[] {
   const ind = calcIndicators(candles, { period: PARAMS.period, stddev: PARAMS.stddev, bwLookback: PARAMS.bwLookback, bwPercentile: PARAMS.bwPercentile });
@@ -23,8 +23,13 @@ function compute(candles: Candle[]): StratRow[] {
 function planEntry(rows: StratRow[], i: number, cash: number): EntryPlan | null {
   const row = rows[i];
   const upper = row.lines.upper;
-  if (upper == null) return null;
+  const ma20 = row.lines.ma20;
+  if (upper == null || ma20 == null) return null;
   const entry = row.close;
+  // 최소 기대수익 필터: 중심선(MA20)까지 상승 여력이 minExpectedReturnPct 미만이면 진입 스킵
+  // (수수료·슬리피지를 못 넘는 트레이드를 사전 차단)
+  const expectedReturnPct = ((ma20 - entry) / entry) * 100;
+  if (expectedReturnPct < PARAMS.minExpectedReturnPct) return null;
   const sl = entry - (upper - entry) / PARAMS.riskReward;
   const shares = calcShares(cash, PARAMS.positionPct, entry);
   if (shares <= 0) return null;
@@ -38,22 +43,26 @@ function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: 
   const ma20 = row.lines.ma20;
   const upper = row.lines.upper;
 
-  // 1. 손절/본절
+  // 1. 손절 (진입 시 설정한 손절가 — 1차 익절 이후에도 본절로 옮기지 않고 그대로 유지되는 하단 안전판)
   if (row.low <= sl) {
-    events.push({ side: 'SELL_SL', price: sl, shares, pnl: shares * (sl - entry), note: tp1_hit ? '본절 청산' : '손절 청산', time: row.time });
+    events.push({ side: 'SELL_SL', price: sl, shares, pnl: shares * (sl - entry), note: '손절 청산', time: row.time });
     return { events, updated: null };
   }
-  // 2. 1차 익절 (중심선 도달 → 50% 청산 + 본절 이동)
+  // 2. 1차 익절 (중심선 도달 → 50% 청산)
   if (!tp1_hit && ma20 != null && row.high >= ma20) {
     const half = shares * 0.5;
-    events.push({ side: 'SELL_TP1', price: ma20, shares: half, pnl: half * (ma20 - entry), note: '중심선 50% 익절 · 손절가 본절 이동', time: row.time });
+    events.push({ side: 'SELL_TP1', price: ma20, shares: half, pnl: half * (ma20 - entry), note: '중심선 50% 익절', time: row.time });
     shares -= half;
     tp1_hit = true;
-    sl = entry;
   }
   // 3. 2차 익절 (상단밴드 도달 → 전량 청산)
   if (tp1_hit && upper != null && row.high >= upper) {
     events.push({ side: 'SELL_TP2', price: upper, shares, pnl: shares * (upper - entry), note: '상단밴드 전량 익절', time: row.time });
+    return { events, updated: null };
+  }
+  // 4. 1차 익절 후 중심선 이탈 마감 청산 (기존 '진입가 터치 본절' 대체 — 봉중 노이즈로 인한 스탑아웃 감소)
+  if (tp1_hit && ma20 != null && row.close < ma20) {
+    events.push({ side: 'SELL_SL', price: row.close, shares, pnl: shares * (row.close - entry), note: '중심선 이탈 마감 청산', time: row.time });
     return { events, updated: null };
   }
   return { events, updated: { ...pos, shares, sl, tp1_hit } };
@@ -124,7 +133,7 @@ function bwPercentRankLocal(bandwidths: (number | null)[], lookback = 100): numb
 export const bnf1: StrategyModule = {
   code: 'bnf1',
   name: 'BNF 전략1 · 볼린저밴드 수렴 회귀',
-  short: '15분봉 볼린저밴드 수렴 후 하단밴드 이탈 매수 → 중심선 50% 익절(본절 이동) → 상단밴드 전량 익절.',
+  short: '15분봉 볼린저밴드 수렴 후 하단밴드 이탈 매수(중심선까지 기대수익 0.8% 이상만) → 중심선 50% 익절 → 상단밴드 전량 익절.',
   interval: '15m',
   range: '60d',
   positionPct: PARAMS.positionPct,
@@ -137,9 +146,10 @@ export const bnf1: StrategyModule = {
   colHeaders: ['밴드폭', 'BW 백분위', '수렴'],
   rules: [
     { tag: '①', color: 'text-accent', title: '진입', body: '밴드폭 수렴(하위 25% + BW MA20 미만) 상태에서 15분봉 종가가 하단밴드 하향 이탈 시 가용 현금 10% 매수. 발산 구간 제외.' },
-    { tag: '②', color: 'text-amber-400', title: '초기 손절', body: '상단밴드 타겟 거리의 절반만큼 하방 = 1:2 손익비 손절선 설정.' },
-    { tag: '③', color: 'text-profit', title: '1차 익절', body: '중심선(MA20) 도달 시 50% 익절 → 즉시 손절가를 본절(진입가)로 이동. 손실 가능성 0%.' },
-    { tag: '④', color: 'text-profit', title: '2차 익절', body: '잔여 50%는 상단밴드 도달 시 전량 익절 청산.' },
+    { tag: '②', color: 'text-accent', title: '최소 기대수익 필터', body: '진입가 기준 중심선(MA20)까지 상승 여력이 0.8% 미만이면 매수 스킵. 수수료·슬리피지를 못 넘는 트레이드를 사전 차단.' },
+    { tag: '③', color: 'text-amber-400', title: '초기 손절', body: '상단밴드 타겟 거리의 절반만큼 하방 = 1:2 손익비 손절선 설정. 1차 익절 이후에도 본절로 옮기지 않고 그대로 유지.' },
+    { tag: '④', color: 'text-profit', title: '1차 익절', body: '중심선(MA20) 도달 시 50% 익절.' },
+    { tag: '⑤', color: 'text-profit', title: '2차 익절 · 이탈 청산', body: '잔여 50%는 상단밴드 도달 시 전량 익절. 그전에 15분봉 종가가 중심선 아래로 마감하면 잔여 물량 청산 (봉중 노이즈로 인한 잦은 스탑아웃 방지).' },
   ],
   compute, scan, planEntry, stepOpen,
 };
