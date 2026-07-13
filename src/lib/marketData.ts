@@ -1,5 +1,5 @@
 // ===== 시세 데이터 엔진 =====
-// 1순위: Yahoo Finance (개발: Vite 프록시 / 배포: Netlify Function 프록시)
+// Yahoo Finance (개발: Vite 프록시 / 배포: Netlify Function 프록시)
 // 실패 시: 합성 데이터(데모 모드)로 폴백하여 시뮬레이션 지속 가능
 import type { Candle, StockDef } from './types';
 
@@ -149,6 +149,11 @@ export const RANGE_BY_INTERVAL: Record<Interval, string[]> = {
 const cache = new Map<string, { at: number; data: Candle[] }>();
 const CACHE_TTL = 60_000;
 
+/** UTC 타임스탐프 → KST 타임스탐프 (초 단위) */
+function toKST(utcSeconds: number): number {
+  return utcSeconds + 32400; // 9시간 = 32400초
+}
+
 export async function fetchCandles(
   symbol: string,
   interval: Interval = '15m',
@@ -172,7 +177,7 @@ export async function fetchCandles(
     for (let i = 0; i < ts.length; i++) {
       const o = q.open?.[i], h = q.high?.[i], l = q.low?.[i], c = q.close?.[i];
       if (o == null || h == null || l == null || c == null) continue;
-      candles.push({ time: ts[i], open: o, high: h, low: l, close: c, volume: q.volume?.[i] ?? 0 });
+      candles.push({ time: toKST(ts[i]), open: o, high: h, low: l, close: c, volume: q.volume?.[i] ?? 0 });
     }
     if (candles.length < 2) throw new Error('insufficient data');
     cache.set(key, { at: Date.now(), data: candles });
