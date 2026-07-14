@@ -3,7 +3,7 @@
 // 토큰은 1분당 1회 발급 제한이 있으므로 반드시 캐시(persist 콜백)를 사용한다.
 import type {
   BrokerAdapter, BrokerCredentials, TokenCache, TokenPersist,
-  AccountSummary, BrokerPosition, OrderRecord, PlaceOrderResult,
+  AccountSummary, BrokerPosition, OrderRecord, PlaceOrderResult, BrokerQuote,
 } from './types';
 import { BrokerError, toKrCode } from './types';
 
@@ -20,6 +20,13 @@ const TR = {
   dailyOrders: { real: 'TTTC8001R', paper: 'VTTC8001R' },
   cancel: { real: 'TTTC0803U', paper: 'VTTC0803U' },
   price: { real: 'FHKST01010100', paper: 'FHKST01010100' },
+  indexPrice: { real: 'FHPUP02100000', paper: 'FHPUP02100000' },
+};
+
+// 야후 지수 심볼 → KIS 업종코드 (FID_COND_MRKT_DIV_CODE='U')
+const INDEX_MAP: Record<string, string> = {
+  '^KS11': '0001', // KOSPI 종합
+  '^KQ11': '1001', // KOSDAQ 종합
 };
 
 const n = (v: unknown): number => {
@@ -191,6 +198,41 @@ export class KISAdapter implements BrokerAdapter {
       FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: toKrCode(symbol),
     });
     return n(j.output?.stck_prpr);
+  }
+
+  /** 전일대비 부호(4=하한,5=하락)면 등락률을 음수로 */
+  private signedPct(pct: unknown, sign: unknown): number {
+    const s = String(sign ?? '');
+    const mult = s === '4' || s === '5' ? -1 : 1;
+    return mult * Math.abs(n(pct));
+  }
+
+  async getQuote(symbol: string): Promise<BrokerQuote> {
+    const idxCode = INDEX_MAP[symbol.toUpperCase()];
+    if (idxCode) {
+      const j = await this.get('/uapi/domestic-stock/v1/quotations/inquire-index-price', TR.indexPrice[this.creds.mode], {
+        FID_COND_MRKT_DIV_CODE: 'U', FID_INPUT_ISCD: idxCode,
+      });
+      const o = j.output ?? {};
+      return {
+        symbol,
+        price: n(o.bstp_nmix_prpr),
+        changePct: this.signedPct(o.bstp_nmix_prdy_ctrt, o.prdy_vrss_sign),
+        open: n(o.bstp_nmix_oprc), high: n(o.bstp_nmix_hgpr), low: n(o.bstp_nmix_lwpr),
+        volume: n(o.acml_vol),
+      };
+    }
+    const j = await this.get('/uapi/domestic-stock/v1/quotations/inquire-price', TR.price[this.creds.mode], {
+      FID_COND_MRKT_DIV_CODE: 'J', FID_INPUT_ISCD: toKrCode(symbol),
+    });
+    const o = j.output ?? {};
+    return {
+      symbol,
+      price: n(o.stck_prpr),
+      changePct: this.signedPct(o.prdy_ctrt, o.prdy_vrss_sign),
+      open: n(o.stck_oprc), high: n(o.stck_hgpr), low: n(o.stck_lwpr),
+      volume: n(o.acml_vol),
+    };
   }
 
   private async order(kind: 'buy' | 'sell', symbol: string, qty: number, price = 0): Promise<PlaceOrderResult> {

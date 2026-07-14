@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fetchCandles, universeStocks, UNIVERSE_OPTIONS, stockName } from '../lib/marketData';
+import { fetchKisQuotes, type KisQuote } from '../lib/realtimeQuotes';
 import { getStrategy, initStrategy } from '../lib/strategies';
 import type { StratScan, Tone } from '../lib/strategies/types';
 import type { StockDef } from '../lib/types';
@@ -30,6 +31,8 @@ export default function ScannerPage() {
   const [aiText, setAiText] = useState('');
   const [aiBusy, setAiBusy] = useState(false);
   const [ollamaConfig] = useOllamaConfig();
+  const [rt, setRt] = useState<{ done: number; total: number; active: boolean } | null>(null);
+  const [rtError, setRtError] = useState('');
 
   const mod = getStrategy(stratCode);
   const enabled = allowedStrategyCodes.includes(stratCode);
@@ -89,7 +92,31 @@ export default function ScannerPage() {
     setScanList(list);
     setResults([]);
     setScanned(0);
+    setRt(null);
+    setRtError('');
     await scanBatch(list, 0, []);
+  };
+
+  // 현재 스캔 결과의 가격·등락률을 KIS 실시간 시세로 덮어쓴다 (신호 판정은 Yahoo 캔들 기준 유지).
+  const goRealtime = async () => {
+    setRtError('');
+    const symbols = results.map((r) => r.symbol);
+    if (!symbols.length) return;
+    setRt({ done: 0, total: symbols.length, active: true });
+    const acc: Record<string, KisQuote> = {};
+    try {
+      await fetchKisQuotes(symbols, (done, total, quotes) => {
+        for (const q of quotes) acc[q.symbol] = q;
+        setResults((prev) => prev.map((r) => {
+          const q = acc[r.symbol];
+          return q ? { ...r, price: q.price, changePct: q.changePct } : r;
+        }));
+        setRt({ done, total, active: true });
+      });
+    } catch (e) {
+      setRtError(e instanceof Error ? e.message : String(e));
+      setRt(null);
+    }
   };
 
   const scanMore = async () => {
@@ -140,8 +167,29 @@ export default function ScannerPage() {
           <button className="btn-primary" onClick={runScan} disabled={scanning || !enabled}>
             {scanning ? '스캔 중...' : '스캔 실행'}
           </button>
+          {!guestMode && results.length > 0 && (
+            <button
+              className="btn-ghost"
+              onClick={goRealtime}
+              disabled={scanning || (!!rt && rt.done < rt.total)}
+              title="한국투자증권(KIS)에서 지연 없는 실시간 시세로 현재가·등락을 덮어씁니다. (종목이 많으면 시간이 걸립니다)"
+            >
+              {rt && rt.done < rt.total ? `⚡ 실시간 조회 중… ${rt.done}/${rt.total}` : '⚡ 실시간(KIS)'}
+            </button>
+          )}
         </div>
       </header>
+      {results.length > 0 && (
+        <div className="text-xs flex items-center gap-2 flex-wrap">
+          {rt?.active ? (
+            <span className="badge bg-up/20 text-up">⚡ 현재가·등락 = 실시간(KIS)</span>
+          ) : (
+            <span className="badge bg-edge text-slate-400">현재가 = Yahoo · 약 15~20분 지연</span>
+          )}
+          <span className="text-slate-500">※ 매수/매도 신호 판정은 항상 Yahoo 캔들 기준입니다.</span>
+          {rtError && <span className="text-red-400">실시간 조회 실패: {rtError}</span>}
+        </div>
+      )}
 
       {!enabled && (
         <div className="card bg-red-500/10 border-red-500/40 text-red-300 text-sm">

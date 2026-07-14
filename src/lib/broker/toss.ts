@@ -5,7 +5,7 @@
 // (자동매매 엔진·웹 화면은 수정 불필요).
 import type {
   BrokerAdapter, BrokerCredentials, TokenCache, TokenPersist,
-  AccountSummary, BrokerPosition, OrderRecord, PlaceOrderResult,
+  AccountSummary, BrokerPosition, OrderRecord, PlaceOrderResult, BrokerQuote,
 } from './types';
 import { BrokerError } from './types';
 
@@ -27,6 +27,7 @@ export class TossAdapter implements BrokerAdapter {
   async getBalance(): Promise<{ account: AccountSummary; positions: BrokerPosition[] }> { throw new BrokerError(NOT_SUPPORTED); }
   async getOrders(): Promise<OrderRecord[]> { throw new BrokerError(NOT_SUPPORTED); }
   async getMarketPrice(): Promise<number> { throw new BrokerError(NOT_SUPPORTED); }
+  async getQuote(): Promise<BrokerQuote> { throw new BrokerError(NOT_SUPPORTED); }
   async placeBuyOrder(): Promise<PlaceOrderResult> { throw new BrokerError(NOT_SUPPORTED); }
   async placeSellOrder(): Promise<PlaceOrderResult> { throw new BrokerError(NOT_SUPPORTED); }
   async cancelOrder(): Promise<PlaceOrderResult> { throw new BrokerError(NOT_SUPPORTED); }

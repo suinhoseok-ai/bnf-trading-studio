@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { fetchIndexQuote, fetchCandles, fetchQuote, ALL_STOCKS, stockName, KOSPI_STOCKS, KOSDAQ_STOCKS } from '../lib/marketData';
+import { fetchKisQuotes, type KisQuote } from '../lib/realtimeQuotes';
 import { getStrategy, initStrategy } from '../lib/strategies';
 import type { StratScan, Tone } from '../lib/strategies/types';
 import { useAuth } from '../context/AuthContext';
@@ -35,6 +36,8 @@ export default function DashboardPage() {
   const [scanning, setScanning] = useState(true);
   const [demo, setDemo] = useState(false);
   const [refreshedAt, setRefreshedAt] = useState<Date | null>(null);
+  const [rt, setRt] = useState<{ done: number; total: number; active: boolean } | null>(null);
+  const [rtError, setRtError] = useState('');
 
   const mod = getStrategy(stratCode);
   const enabled = allowedStrategyCodes.includes(stratCode);
@@ -42,6 +45,8 @@ export default function DashboardPage() {
   const refresh = useCallback(async () => {
     setScanning(true);
     setDemo(false);
+    setRt(null);
+    setRtError('');
     await initStrategy(mod); // 시장 지수 등 준비 (전략6)
     // 지수
     const [kospi, kosdaq] = await Promise.all([fetchIndexQuote('^KS11'), fetchIndexQuote('^KQ11')]);
@@ -89,6 +94,46 @@ export default function DashboardPage() {
     setStockQuotes(Object.fromEntries(entries));
   };
 
+  // 실시간(KIS) 시세를 현재 화면 상태(지수·종목카드·신호표)에 덮어쓴다.
+  const applyRealtime = (map: Record<string, KisQuote>) => {
+    setIndices((prev) => prev.map((ix) => {
+      const code = ix.label === 'KOSPI' ? '^KS11' : ix.label === 'KOSDAQ' ? '^KQ11' : '';
+      const q = map[code];
+      return q ? { ...ix, price: q.price, changePct: q.changePct } : ix;
+    }));
+    setStockQuotes((prev) => {
+      const next = { ...prev };
+      for (const sym of Object.keys(next)) {
+        const q = map[sym];
+        if (q) next[sym] = { price: q.price, changePct: q.changePct };
+      }
+      return next;
+    });
+    setSignals((prev) => prev.map((s) => {
+      const q = map[s.symbol];
+      return q ? { ...s, price: q.price, changePct: q.changePct } : s;
+    }));
+  };
+
+  const goRealtime = async () => {
+    setRtError('');
+    const symbols = ['^KS11', '^KQ11', ...dashSymbols, ...signals.map((s) => s.symbol)];
+    const uniq = [...new Set(symbols)];
+    setRt({ done: 0, total: uniq.length, active: true });
+    const acc: Record<string, KisQuote> = {};
+    try {
+      await fetchKisQuotes(uniq, (done, total, quotes) => {
+        for (const q of quotes) acc[q.symbol] = q;
+        applyRealtime(acc);
+        setRt({ done, total, active: true });
+      });
+      setRefreshedAt(new Date());
+    } catch (e) {
+      setRtError(e instanceof Error ? e.message : String(e));
+      setRt(null);
+    }
+  };
+
   useEffect(() => { refresh(); }, [refresh]);
 
   const persistDash = (next: string[]) => { setDashSymbols(next); localStorage.setItem('dashStocks', JSON.stringify(next)); };
@@ -117,12 +162,32 @@ export default function DashboardPage() {
           {demo && <span className="badge bg-amber-500/20 text-amber-400">데모 데이터 (실시세 조회 불가 시 합성 데이터)</span>}
           <button className="btn-ghost" onClick={() => setEditStocks((v) => !v)}>🔧 표시 종목 편집</button>
           <StrategyPicker value={stratCode} onChange={setStratCode} />
-          <button className="btn-primary" onClick={refresh} disabled={scanning}>
+          <button className="btn-primary" onClick={refresh} disabled={scanning || !!rt?.active}>
             {scanning ? '갱신 중...' : '🔄 시세 갱신'}
           </button>
+          {!guestMode && (
+            <button
+              className="btn-ghost"
+              onClick={goRealtime}
+              disabled={scanning || (!!rt && rt.done < rt.total)}
+              title="한국투자증권(KIS)에서 지연 없는 실시간 시세를 조회해 덮어씁니다."
+            >
+              {rt && rt.done < rt.total ? `⚡ 실시간 조회 중… ${rt.done}/${rt.total}` : '⚡ 실시간(KIS)'}
+            </button>
+          )}
         </div>
       </header>
-      {refreshedAt && <div className="text-xs text-slate-500 -mt-3">최근 갱신: {refreshedAt.toLocaleString('ko-KR')}</div>}
+      {refreshedAt && (
+        <div className="text-xs text-slate-500 -mt-3 flex items-center gap-2 flex-wrap">
+          <span>최근 갱신: {refreshedAt.toLocaleString('ko-KR')}</span>
+          {rt?.active ? (
+            <span className="badge bg-up/20 text-up">⚡ 실시간 시세(KIS)</span>
+          ) : (
+            <span className="badge bg-edge text-slate-400">Yahoo · 약 15~20분 지연</span>
+          )}
+          {rtError && <span className="text-red-400">실시간 조회 실패: {rtError}</span>}
+        </div>
+      )}
 
       {/* 개별 종목 카드 편집 패널 */}
       {editStocks && (

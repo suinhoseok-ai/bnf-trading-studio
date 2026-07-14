@@ -43,6 +43,17 @@ export interface PlaceOrderResult {
   message?: string;
 }
 
+/** 실시간 시세 스냅샷 (거래소 직접 조회 — 지연 없음) */
+export interface BrokerQuote {
+  symbol: string;
+  price: number;      // 현재가
+  changePct: number;  // 전일 대비 등락률(%)
+  open: number;
+  high: number;
+  low: number;
+  volume: number;     // 누적 거래량
+}
+
 export interface BrokerCredentials {
   appKey: string;
   appSecret: string;
@@ -69,6 +80,8 @@ export interface BrokerAdapter {
   getBalance(): Promise<{ account: AccountSummary; positions: BrokerPosition[] }>;
   getOrders(days?: number): Promise<OrderRecord[]>;
   getMarketPrice(symbol: string): Promise<number>;
+  /** 실시간 현재가·등락률 등 시세 스냅샷 (지수는 ^KS11=KOSPI, ^KQ11=KOSDAQ) */
+  getQuote(symbol: string): Promise<BrokerQuote>;
   /** price 미지정(0) 시 시장가 */
   placeBuyOrder(symbol: string, qty: number, price?: number): Promise<PlaceOrderResult>;
   placeSellOrder(symbol: string, qty: number, price?: number): Promise<PlaceOrderResult>;

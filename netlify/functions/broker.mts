@@ -7,6 +7,7 @@
 //   account        계좌 요약
 //   positions      거래소 보유 포지션
 //   orders         최근 주문 내역
+//   quotes         실시간 시세 스냅샷 { symbols[] } (최대 6개/요청, 서버가 초당제한 맞춰 지연)
 //   force-sell     강제매도 { symbol, qty(0=전량), price(0=시장가) }
 //   save-strategy  전략 카드 저장 { id?, strategyCode, universe, intervalMin, maxPositions, budget }
 //   toggle-strategy 전략 카드 시작/중지 { id, running }
@@ -50,6 +51,22 @@ async function makeAdapter(sb: SupabaseClient, row: SettingsRow) {
 
 const log = (sb: SupabaseClient, uid: string, level: string, event: string, detail: string) =>
   sb.from('bnf_trade_logs').insert({ user_id: uid, level, event, detail }).then(() => {});
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/** KIS 초당 거래건수 초과 시 짧게 대기 후 1회 재시도 */
+async function withRateLimitRetry<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('초당 거래건수') || msg.includes('429') || msg.includes('Too Many')) {
+      await sleep(1000);
+      return fn();
+    }
+    throw e;
+  }
+}
 
 export default async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
@@ -153,6 +170,28 @@ export default async (req: Request) => {
         if (!row) return json({ ok: false, error: '설정 없음' }, 400);
         const adapter = await makeAdapter(sb, row);
         return json({ ok: true, orders: await adapter.getOrders(Number(body.days) || 7) });
+      }
+
+      case 'quotes': {
+        // 실시간 시세 스냅샷 (거래소 직접). 브라우저가 종목을 소량씩 순차 요청하고,
+        // 서버는 배치 내에서 KIS 초당 제한에 맞춰 호출 간 지연을 둔다.
+        const row = await loadSettings();
+        if (!row) return json({ ok: false, error: '거래소 연결 설정을 먼저 저장하세요.' }, 400);
+        const symbols = (Array.isArray(body.symbols) ? body.symbols : []).map(String).slice(0, 6);
+        if (!symbols.length) return json({ ok: true, quotes: [], mode: row.mode });
+        const adapter = await makeAdapter(sb, row);
+        // 모의투자는 초당 제한이 훨씬 엄격 → 호출 간 간격을 크게
+        const gap = row.mode === 'paper' ? 550 : 120;
+        const quotes: Record<string, unknown>[] = [];
+        for (let i = 0; i < symbols.length; i++) {
+          await sleep(gap); // 배치 경계 포함 항상 선-대기하여 초당 제한 회피
+          try {
+            quotes.push(await withRateLimitRetry(() => adapter.getQuote(symbols[i])));
+          } catch (e) {
+            quotes.push({ symbol: symbols[i], error: e instanceof Error ? e.message : String(e) });
+          }
+        }
+        return json({ ok: true, quotes, mode: row.mode });
       }
 
       case 'force-sell': {
