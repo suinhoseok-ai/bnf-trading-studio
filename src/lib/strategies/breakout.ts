@@ -96,6 +96,7 @@ export const breakout: StrategyModule = {
   range: '1y',
   positionPct: PARAMS.positionPct,
   params: PARAMS,
+  regime: 'BULL', risk: 3,
   lineStyles: [
     { key: 'high60', color: '#f59e0b', width: 2, label: '60일 저항선' },
     { key: 'ema20', color: '#22c55e', width: 1, label: 'EMA20 추세선' },

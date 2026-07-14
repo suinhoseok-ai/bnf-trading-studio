@@ -16,7 +16,10 @@ export function useTelegramConfig(): [TelegramConfig, (c: TelegramConfig) => Pro
   })();
 
   const saved = profile?.settings?.telegram ?? local ?? {};
-  const config: TelegramConfig = { ...DEFAULT_TELEGRAM, ...saved };
+  const config: TelegramConfig = {
+    ...DEFAULT_TELEGRAM, ...saved,
+    regimeNotify: { ...DEFAULT_TELEGRAM.regimeNotify, ...(saved.regimeNotify ?? {}) },
+  };
 
   const save = useCallback(
     async (c: TelegramConfig) => {

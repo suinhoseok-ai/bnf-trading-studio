@@ -3,6 +3,13 @@
 // 실제 발송은 서버(Netlify 함수/예약함수)에서 수행하며, 이 파일은
 // 프론트엔드 테스트 발송 + 메시지 포맷 유틸을 제공한다 (서버도 포맷 유틸을 재사용).
 
+export interface RegimeNotifyConfig {
+  enabled: boolean;
+  preopen: boolean;
+  midday: boolean;
+  close: boolean;
+}
+
 export interface TelegramConfig {
   botToken: string;
   chatId: string;
@@ -14,7 +21,15 @@ export interface TelegramConfig {
   sellIntervalMin: number;
   universe: string;
   strategy: string;
+  regimeNotify: RegimeNotifyConfig;
 }
+
+export const DEFAULT_REGIME_NOTIFY: RegimeNotifyConfig = {
+  enabled: false,
+  preopen: true,
+  midday: true,
+  close: true,
+};
 
 export const DEFAULT_TELEGRAM: TelegramConfig = {
   botToken: '',
@@ -27,6 +42,7 @@ export const DEFAULT_TELEGRAM: TelegramConfig = {
   sellIntervalMin: 10,
   universe: 'KOSPI',
   strategy: 'bnf1',
+  regimeNotify: DEFAULT_REGIME_NOTIFY,
 };
 
 /** 프론트엔드 테스트 발송 — Netlify 함수(/api/telegram) 프록시 경유 (CORS 회피) */

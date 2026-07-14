@@ -141,6 +141,7 @@ export const rebound: StrategyModule = {
   range: '1y',
   positionPct: PARAMS.positionPct,
   params: PARAMS,
+  regime: 'BEAR', risk: 4,
   lineStyles: [
     { key: 'sma5', color: '#f59e0b', width: 2, label: 'SMA5 (회귀 목표)' },
   ],

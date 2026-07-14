@@ -164,6 +164,43 @@ export default function SettingsPage() {
         </div>
         <p className="text-xs text-slate-500">알림은 한국 정규장 시간(평일 09:00~15:30)에만 발송됩니다.</p>
 
+        <div className="border-t border-edge pt-3 space-y-2">
+          <label className="flex items-center gap-2 text-sm font-medium text-ink">
+            <input
+              type="checkbox"
+              checked={tg.regimeNotify.enabled}
+              onChange={(e) => setTgField('regimeNotify', { ...tg.regimeNotify, enabled: e.target.checked })}
+            />
+            시장국면 알림 받기 (KOSPI/KOSDAQ 상승·횡보·하락 판정 결과)
+          </label>
+          <div className="flex gap-4 text-sm text-slate-300 flex-wrap pl-6">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={tg.regimeNotify.preopen}
+                onChange={(e) => setTgField('regimeNotify', { ...tg.regimeNotify, preopen: e.target.checked })}
+              />
+              장전 (08:30)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={tg.regimeNotify.midday}
+                onChange={(e) => setTgField('regimeNotify', { ...tg.regimeNotify, midday: e.target.checked })}
+              />
+              장중 (11:00)
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={tg.regimeNotify.close}
+                onChange={(e) => setTgField('regimeNotify', { ...tg.regimeNotify, close: e.target.checked })}
+              />
+              장마감 (15:30)
+            </label>
+          </div>
+        </div>
+
         <div className="flex gap-2">
           <button className="btn-ghost" onClick={testTelegram} disabled={tgTesting || !tg.botToken || !tg.chatId}>
             {tgTesting ? '전송 중...' : '테스트 발송'}

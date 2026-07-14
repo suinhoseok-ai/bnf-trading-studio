@@ -121,6 +121,7 @@ export const pullback: StrategyModule = {
   range: '1y',
   positionPct: PARAMS.positionPct,
   params: PARAMS,
+  regime: 'BULL', risk: 2,
   lineStyles: [
     { key: 'ema20', color: '#f59e0b', width: 2, label: 'EMA20' },
     { key: 'ema60', color: '#8b5cf6', width: 1, label: 'EMA60' },

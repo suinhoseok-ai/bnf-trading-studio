@@ -63,6 +63,180 @@ export function meanOfPrev(vals: number[], period: number, idx: number): number 
   return sum / period;
 }
 
+// ── Phase 3 공통 지표 (ATR/ADX/CCI/Stochastic/OBV/VWAP/캔들패턴) ──
+// 전부 Wilder 방식 또는 표준 산식. null = 워밍업 구간(데이터 부족).
+
+/** True Range 배열 */
+function trueRangeArr(highs: number[], lows: number[], closes: number[]): number[] {
+  return highs.map((h, i) => {
+    if (i === 0) return h - lows[i];
+    return Math.max(h - lows[i], Math.abs(h - closes[i - 1]), Math.abs(lows[i] - closes[i - 1]));
+  });
+}
+
+/** ATR (Wilder 스무딩). idx < period 구간은 null */
+export function atrArr(highs: number[], lows: number[], closes: number[], period = 14): (number | null)[] {
+  const tr = trueRangeArr(highs, lows, closes);
+  const out: (number | null)[] = new Array(tr.length).fill(null);
+  let atr = 0;
+  for (let i = 0; i < tr.length; i++) {
+    if (i < period) { atr += tr[i] / period; if (i === period - 1) out[i] = atr; continue; }
+    atr = (atr * (period - 1) + tr[i]) / period;
+    out[i] = atr;
+  }
+  return out;
+}
+
+/** ADX + DI (Wilder). idx < period*2 근처까지 null 가능 */
+export function adxArr(highs: number[], lows: number[], closes: number[], period = 14): { adx: (number | null)[]; plusDI: (number | null)[]; minusDI: (number | null)[] } {
+  const n = highs.length;
+  const tr = trueRangeArr(highs, lows, closes);
+  const plusDM: number[] = new Array(n).fill(0);
+  const minusDM: number[] = new Array(n).fill(0);
+  for (let i = 1; i < n; i++) {
+    const up = highs[i] - highs[i - 1];
+    const down = lows[i - 1] - lows[i];
+    plusDM[i] = up > down && up > 0 ? up : 0;
+    minusDM[i] = down > up && down > 0 ? down : 0;
+  }
+  const smooth = (vals: number[]): number[] => {
+    const out = new Array(n).fill(0);
+    let acc = 0;
+    for (let i = 0; i < n; i++) {
+      if (i < period) { acc += vals[i]; if (i === period - 1) out[i] = acc; continue; }
+      acc = out[i - 1] - out[i - 1] / period + vals[i];
+      out[i] = acc;
+    }
+    return out;
+  };
+  const smTR = smooth(tr), smPlus = smooth(plusDM), smMinus = smooth(minusDM);
+  const plusDI: (number | null)[] = new Array(n).fill(null);
+  const minusDI: (number | null)[] = new Array(n).fill(null);
+  const dx: (number | null)[] = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    if (smTR[i] === 0) continue;
+    const pDI = 100 * (smPlus[i] / smTR[i]);
+    const mDI = 100 * (smMinus[i] / smTR[i]);
+    plusDI[i] = pDI; minusDI[i] = mDI;
+    const sum = pDI + mDI;
+    dx[i] = sum > 0 ? 100 * Math.abs(pDI - mDI) / sum : 0;
+  }
+  const adx: (number | null)[] = new Array(n).fill(null);
+  let adxAcc = 0;
+  let started = false;
+  let warm = 0;
+  for (let i = 0; i < n; i++) {
+    const d = dx[i];
+    if (d == null) continue;
+    if (!started) {
+      adxAcc += d; warm++;
+      if (warm === period) { adxAcc /= period; adx[i] = adxAcc; started = true; }
+      continue;
+    }
+    adxAcc = (adxAcc * (period - 1) + d) / period;
+    adx[i] = adxAcc;
+  }
+  return { adx, plusDI, minusDI };
+}
+
+/** CCI (Commodity Channel Index) */
+export function cciArr(highs: number[], lows: number[], closes: number[], period = 20): (number | null)[] {
+  const n = highs.length;
+  const tp = highs.map((h, i) => (h + lows[i] + closes[i]) / 3);
+  const out: (number | null)[] = new Array(n).fill(null);
+  for (let i = period - 1; i < n; i++) {
+    const slice = tp.slice(i - period + 1, i + 1);
+    const mean = slice.reduce((a, b) => a + b, 0) / period;
+    const meanDev = slice.reduce((a, b) => a + Math.abs(b - mean), 0) / period;
+    out[i] = meanDev === 0 ? 0 : (tp[i] - mean) / (0.015 * meanDev);
+  }
+  return out;
+}
+
+/** Slow Stochastic: %K(fast)를 kSmooth로 한 번 평활한 것이 Slow %K, 그걸 dPeriod로 평활한 게 %D */
+export function slowStochArr(highs: number[], lows: number[], closes: number[], kPeriod = 14, kSmooth = 3, dPeriod = 3): { k: (number | null)[]; d: (number | null)[] } {
+  const n = highs.length;
+  const fastK: (number | null)[] = new Array(n).fill(null);
+  for (let i = kPeriod - 1; i < n; i++) {
+    const hh = Math.max(...highs.slice(i - kPeriod + 1, i + 1));
+    const ll = Math.min(...lows.slice(i - kPeriod + 1, i + 1));
+    fastK[i] = hh === ll ? 50 : ((closes[i] - ll) / (hh - ll)) * 100;
+  }
+  const smoothArr = (vals: (number | null)[], period: number): (number | null)[] => {
+    const out: (number | null)[] = new Array(n).fill(null);
+    for (let i = 0; i < n; i++) {
+      const window = vals.slice(Math.max(0, i - period + 1), i + 1).filter((v): v is number => v != null);
+      if (window.length === period) out[i] = window.reduce((a, b) => a + b, 0) / period;
+    }
+    return out;
+  };
+  const slowK = smoothArr(fastK, kSmooth);
+  const slowD = smoothArr(slowK, dPeriod);
+  return { k: slowK, d: slowD };
+}
+
+/** OBV (On Balance Volume) */
+export function obvArr(closes: number[], volumes: number[]): number[] {
+  const out: number[] = new Array(closes.length).fill(0);
+  for (let i = 1; i < closes.length; i++) {
+    if (closes[i] > closes[i - 1]) out[i] = out[i - 1] + volumes[i];
+    else if (closes[i] < closes[i - 1]) out[i] = out[i - 1] - volumes[i];
+    else out[i] = out[i - 1];
+  }
+  return out;
+}
+
+/** 당일 누적 VWAP (KST 캘린더 날짜가 바뀌면 리셋). time은 KST 보정된 unix seconds. */
+export function vwapArr(times: number[], highs: number[], lows: number[], closes: number[], volumes: number[]): (number | null)[] {
+  const dateStr = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+  const out: (number | null)[] = new Array(times.length).fill(null);
+  let curDate = '';
+  let cumPV = 0, cumVol = 0;
+  for (let i = 0; i < times.length; i++) {
+    const d = dateStr(times[i]);
+    if (d !== curDate) { curDate = d; cumPV = 0; cumVol = 0; }
+    const tp = (highs[i] + lows[i] + closes[i]) / 3;
+    cumPV += tp * volumes[i];
+    cumVol += volumes[i];
+    out[i] = cumVol > 0 ? cumPV / cumVol : closes[i];
+  }
+  return out;
+}
+
+/** 거래량 Z-score (직전 lookback봉 평균/표준편차 기준, 현재봉 제외) */
+export function volumeZScoreAt(volumes: number[], lookback: number, idx: number): number | null {
+  if (idx < lookback) return null;
+  const window = volumes.slice(idx - lookback, idx);
+  const mean = window.reduce((a, b) => a + b, 0) / lookback;
+  const sd = Math.sqrt(window.reduce((a, b) => a + (b - mean) ** 2, 0) / lookback);
+  if (sd === 0) return 0;
+  return (volumes[idx] - mean) / sd;
+}
+
+export interface CandlePattern {
+  hammer: boolean;          // 아래꼬리 긴 반전형 (몸통 대비 아래꼬리 2배 이상, 윗꼬리 짧음)
+  bullishEngulfing: boolean; // 전일 음봉 몸통을 당일 양봉 몸통이 완전히 감쌈
+  longLowerWick: boolean;    // 아래꼬리가 몸통의 2배 이상인 양봉/음봉 공통
+  bigBull: boolean;          // 장대양봉 (몸통이 당일 변동폭의 60% 이상 + 양봉)
+}
+
+/** 단일 캔들(및 전봉)로 판정 가능한 반등형 패턴들. Morning Star(3봉)는 생략(2봉 근사 불가). */
+export function detectCandle(c: { open: number; high: number; low: number; close: number }, prev?: { open: number; high: number; low: number; close: number }): CandlePattern {
+  const body = Math.abs(c.close - c.open);
+  const range = c.high - c.low;
+  const lowerWick = Math.min(c.open, c.close) - c.low;
+  const upperWick = c.high - Math.max(c.open, c.close);
+  const isBull = c.close > c.open;
+
+  const hammer = range > 0 && body > 0 && lowerWick >= body * 2 && upperWick <= body * 0.5;
+  const longLowerWick = range > 0 && body > 0 && lowerWick >= body * 2;
+  const bigBull = range > 0 && isBull && body >= range * 0.6;
+  const bullishEngulfing = !!prev && prev.close < prev.open && isBull &&
+    c.close >= prev.open && c.open <= prev.close;
+
+  return { hammer, bullishEngulfing, longLowerWick, bigBull };
+}
+
 /** RSI (rolling 평균 방식 — 명세서 스켈레톤과 동일) */
 export function rsiSimple(closes: number[], period: number): (number | null)[] {
   const gains: number[] = [0];

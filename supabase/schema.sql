@@ -293,6 +293,18 @@ create table if not exists public.bnf_trade_logs (
   created_at timestamptz not null default now()
 );
 
+-- 시장국면 판정 이력 (KOSPI/KOSDAQ, 세션당 1건: preopen 08:30 / midday 11:00 / close 15:30)
+create table if not exists public.bnf_market_regime (
+  id bigserial primary key,
+  judged_at timestamptz not null default now(),
+  session text not null check (session in ('preopen', 'midday', 'close')),
+  trade_date date not null,
+  kospi_regime text not null check (kospi_regime in ('BULL', 'SIDEWAYS', 'BEAR')),
+  kosdaq_regime text not null check (kosdaq_regime in ('BULL', 'SIDEWAYS', 'BEAR')),
+  detail jsonb not null default '{}'::jsonb,
+  unique (trade_date, session)
+);
+
 -- ------------------------------------------------------------
 -- 7. 관리자 전역 설정 (일일 이메일 스캔 리포트 등) — 단일 행
 -- ------------------------------------------------------------
@@ -399,3 +411,9 @@ create policy "admin_config_select" on public.bnf_admin_config
 drop policy if exists "admin_config_admin" on public.bnf_admin_config;
 create policy "admin_config_admin" on public.bnf_admin_config
   for all using (public.is_admin());
+
+-- bnf_market_regime: 로그인 사용자 전체 조회, service role(스케줄 함수)만 기록
+alter table public.bnf_market_regime enable row level security;
+drop policy if exists "market_regime_select" on public.bnf_market_regime;
+create policy "market_regime_select" on public.bnf_market_regime
+  for select using (auth.uid() is not null);

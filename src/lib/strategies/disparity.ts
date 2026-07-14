@@ -156,6 +156,7 @@ export const disparity: StrategyModule = {
   range: '2y',
   positionPct: PARAMS.positionPct,
   params: PARAMS,
+  regime: 'BEAR', risk: 3,
   lineStyles: [
     { key: 'ema25', color: '#f59e0b', width: 2, label: 'EMA25' },
     { key: 'support', color: '#ef4444', width: 1, label: '지지선(최근 저점)' },

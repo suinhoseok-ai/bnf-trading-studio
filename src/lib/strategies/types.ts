@@ -70,6 +70,9 @@ export interface LineStyle {
 /** 캔들 조회 함수 (클라이언트/서버가 각자 구현을 주입) */
 export type CandleFetcher = (symbol: string, interval: Interval, range: string) => Promise<Candle[]>;
 
+/** 전략이 가장 잘 작동하는 시장국면 */
+export type StrategyRegime = 'BULL' | 'SIDEWAYS' | 'BEAR' | 'ANY';
+
 /** 전략 모듈 — 각 전략이 구현 */
 export interface StrategyModule {
   code: string;
@@ -79,6 +82,8 @@ export interface StrategyModule {
   range: string; // 기본 조회 기간
   positionPct: number; // 진입 비중 (% of cash)
   params: Record<string, number>;
+  regime: StrategyRegime; // 적정 장세 (관리자 화면·추천 로직에 사용)
+  risk: 1 | 2 | 3 | 4 | 5; // 위험도 (1=낮음 5=높음, 추천 로직이 risk<=3만 추천)
   lineStyles: LineStyle[]; // 차트에 그릴 라인
   colHeaders: string[]; // 스캐너 지표 컬럼 헤더
   rules: { tag: string; color: string; title: string; body: string }[]; // 대시보드 요약 카드

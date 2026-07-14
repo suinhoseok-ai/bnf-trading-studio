@@ -118,6 +118,7 @@ export const alignment: StrategyModule = {
   range: '2y',
   positionPct: PARAMS.positionPct,
   params: PARAMS,
+  regime: 'BULL', risk: 2,
   lineStyles: [
     { key: 'ma5', color: '#ef4444', width: 1, label: 'MA5' },
     { key: 'ma20', color: '#f59e0b', width: 1, label: 'MA20' },
