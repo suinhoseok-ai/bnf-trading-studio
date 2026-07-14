@@ -34,7 +34,8 @@ const toneCls = (t?: Tone) =>
   t === 'up' ? 'text-up' : t === 'down' ? 'text-down' : t === 'accent' ? 'text-accent' : t === 'muted' ? 'text-slate-500' : 'text-slate-200';
 
 export default function DashboardPage() {
-  const { profile, guestMode, allowedStrategyCodes } = useAuth();
+  const { profile, guestMode, allowedStrategyCodes, strategies: strategyRows } = useAuth();
+  const strategyOrder = strategyRows.map((s) => s.code); // 관리자 지정 순서 (sort_order 정렬됨)
   const [stratCode, setStratCode] = useStrategySelection();
   const [indices, setIndices] = useState<IndexQuote[]>([]);
   const [dashSymbols, setDashSymbols] = useState<string[]>(loadDashSymbols);
@@ -329,7 +330,7 @@ export default function DashboardPage() {
 
           {(['kospi', 'kosdaq'] as const).map((key) => {
             const r = regime[key];
-            const rec = recommendForRegime(r.regime);
+            const rec = recommendForRegime(r.regime, strategyOrder);
             return (
               <div key={key} className="bg-base rounded-lg p-3 border border-edge">
                 <div className="font-semibold text-ink mb-2">

@@ -35,6 +35,8 @@ const GUEST_STRATEGIES: Strategy[] = ALL_STRATEGIES.map((m, i) => ({
   description: m.short,
   enabled: true,
   params: m.params,
+  sort_order: (i + 1) * 10,
+  regime: m.regime,
 }));
 const GUEST_CODES = ALL_STRATEGIES.map((m) => m.code);
 
@@ -50,7 +52,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const { data: prof } = await supabase.from('bnf_profiles').select('*').eq('id', userId).single();
     setProfile((prof as unknown as Profile) ?? null);
 
-    const { data: strats } = await supabase.from('bnf_strategies').select('*').order('id');
+    const { data: strats } = await supabase.from('bnf_strategies').select('*').order('sort_order').order('id');
     const stratList = (strats as unknown as Strategy[]) ?? [];
     setStrategies(stratList);
 

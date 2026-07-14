@@ -137,6 +137,21 @@ update public.bnf_strategies set
   params = '{"drop5":15,"drop10":20,"ma60Ratio":0.80,"ema25Ratio":0.85,"rsiLo":20,"rsiHi":35,"maxDays":5,"positionPct":15}'::jsonb
 where code = 'disparity';
 
+-- Phase 4: 관리자 화면에서 드래그로 순서를 바꾸고(sort_order), 적정 장세(regime)를 뱃지로 보여주기 위한 컬럼
+alter table public.bnf_strategies
+  add column if not exists sort_order int not null default 100,
+  add column if not exists regime text not null default 'ANY' check (regime in ('BULL', 'SIDEWAYS', 'BEAR', 'ANY'));
+
+update public.bnf_strategies set sort_order = 10, regime = 'SIDEWAYS' where code = 'bnf1';
+update public.bnf_strategies set sort_order = 20, regime = 'BULL' where code = 'breakout';
+update public.bnf_strategies set sort_order = 30, regime = 'BULL' where code = 'pullback';
+update public.bnf_strategies set sort_order = 40, regime = 'BULL' where code = 'alignment';
+update public.bnf_strategies set sort_order = 50, regime = 'SIDEWAYS' where code = 'box';
+update public.bnf_strategies set sort_order = 60, regime = 'BEAR' where code = 'rebound';
+update public.bnf_strategies set sort_order = 70, regime = 'BEAR' where code = 'disparity';
+update public.bnf_strategies set sort_order = 80, regime = 'BULL' where code = 'openbrk';
+update public.bnf_strategies set sort_order = 90, regime = 'SIDEWAYS' where code = 'rangeswing';
+
 -- ------------------------------------------------------------
 -- 3. 사용자별 전략 사용권한 (관리자가 개별 부여/차단)
 -- ------------------------------------------------------------

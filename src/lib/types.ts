@@ -135,6 +135,8 @@ export interface Strategy {
   description: string;
   enabled: boolean;
   params: Record<string, number>;
+  sort_order: number;
+  regime: 'BULL' | 'SIDEWAYS' | 'BEAR' | 'ANY';
 }
 
 export interface StockDef {

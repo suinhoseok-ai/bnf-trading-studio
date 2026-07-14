@@ -40,7 +40,7 @@ export default function AdminPage() {
     if (guestMode) return;
     const { data: u } = await supabase.from('bnf_profiles').select('*').order('created_at', { ascending: false });
     setUsers((u as unknown as Profile[]) ?? []);
-    const { data: s } = await supabase.from('bnf_strategies').select('*').order('id');
+    const { data: s } = await supabase.from('bnf_strategies').select('*').order('sort_order').order('id');
     setStrategies((s as unknown as Strategy[]) ?? []);
     const { data: cfg } = await supabase.from('bnf_admin_config').select('config').eq('id', 1).maybeSingle();
     if (cfg?.config) setReport({ ...DEFAULT_REPORT, ...(cfg.config as AdminConfig) });
@@ -106,6 +106,22 @@ export default function AdminPage() {
     await supabase.from('bnf_strategies').update({ enabled: !s.enabled }).eq('id', s.id);
     flash(`${s.name} → ${!s.enabled ? '사용' : '중지'}`);
     await load();
+    await refreshProfile();
+  };
+
+  // ── 전략 순서 드래그 정렬 ──
+  const [dragId, setDragId] = useState<number | null>(null);
+  const reorderStrategies = async (fromId: number, toId: number) => {
+    if (fromId === toId) return;
+    const cur = [...strategies];
+    const fromIdx = cur.findIndex((s) => s.id === fromId);
+    const toIdx = cur.findIndex((s) => s.id === toId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const [moved] = cur.splice(fromIdx, 1);
+    cur.splice(toIdx, 0, moved);
+    setStrategies(cur); // 즉시 반영 (낙관적 업데이트)
+    await Promise.all(cur.map((s, i) => supabase.from('bnf_strategies').update({ sort_order: (i + 1) * 10 }).eq('id', s.id)));
+    flash('전략 순서 저장 완료');
     await refreshProfile();
   };
 
@@ -215,16 +231,33 @@ export default function AdminPage() {
         </div>
       )}
 
-      {/* ── 전략 관리 (전역 사용유무) ── */}
+      {/* ── 전략 관리 (전역 사용유무 + 순서 드래그 + 적정 장세) ── */}
       {tab === 'strategies' && (
         <div className="space-y-3">
+          <p className="text-xs text-slate-500">카드를 드래그해서 노출 순서를 바꿀 수 있습니다. 순서는 대시보드·스캐너 등 전략 선택 드롭다운과 국면별 추천 우선순위에 반영됩니다.</p>
           {strategies.map((s) => (
-            <div key={s.id} className="card flex items-start justify-between gap-4">
-              <div>
-                <div className="font-bold text-ink">{s.name} <span className="text-xs text-slate-500">({s.code})</span></div>
-                <p className="text-sm text-slate-400 mt-1 leading-relaxed">{s.description}</p>
-                <div className="text-xs text-slate-500 mt-2">
-                  파라미터: {Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(' · ')}
+            <div
+              key={s.id}
+              className={`card flex items-start justify-between gap-4 cursor-move ${dragId === s.id ? 'opacity-50' : ''}`}
+              draggable
+              onDragStart={() => setDragId(s.id)}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); if (dragId != null) reorderStrategies(dragId, s.id); setDragId(null); }}
+              onDragEnd={() => setDragId(null)}
+            >
+              <div className="flex items-start gap-3">
+                <span className="text-slate-500 select-none mt-1" title="드래그하여 순서 변경">⠿</span>
+                <div>
+                  <div className="font-bold text-ink flex items-center gap-2 flex-wrap">
+                    {s.name} <span className="text-xs text-slate-500">({s.code})</span>
+                    <span className="badge bg-edge text-slate-300">
+                      {s.regime === 'BULL' ? '📈 상승장' : s.regime === 'SIDEWAYS' ? '↔️ 횡보장' : s.regime === 'BEAR' ? '📉 하락장' : '🌐 공용'}
+                    </span>
+                  </div>
+                  <p className="text-sm text-slate-400 mt-1 leading-relaxed">{s.description}</p>
+                  <div className="text-xs text-slate-500 mt-2">
+                    파라미터: {Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(' · ')}
+                  </div>
                 </div>
               </div>
               <button

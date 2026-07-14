@@ -104,6 +104,8 @@ export default async () => {
 
   // ── 텔레그램 발송 (수신 설정 켠 사용자만) ──
   const { data: profiles } = await sb.from('bnf_profiles').select('id, settings');
+  const { data: stratRows } = await sb.from('bnf_strategies').select('code').order('sort_order').order('id');
+  const strategyOrder = (stratRows ?? []).map((s) => s.code as string);
   const sessionField = session === 'preopen' ? 'preopen' : session === 'midday' ? 'midday' : 'close';
   const evLine = (label: string, ev: { label: string; met: boolean; value: string }[]) => {
     const met = ev.filter((e) => e.met).map((e) => e.label).join(', ');
@@ -115,7 +117,7 @@ export default async () => {
     `KOSPI: ${regimeIcon(kospi.regime)} ${regimeLabel(kospi.regime)} (${Math.round(kospi.price).toLocaleString('ko-KR')})`,
     `KOSDAQ: ${regimeIcon(kosdaq.regime)} ${regimeLabel(kosdaq.regime)} (${Math.round(kosdaq.price).toLocaleString('ko-KR')})`,
     evLine('근거(KOSPI)', kospi.evidence),
-    recommendLine(kospi.regime),
+    recommendLine(kospi.regime, strategyOrder),
   ];
   const text = bodyLines.join('\n');
 
