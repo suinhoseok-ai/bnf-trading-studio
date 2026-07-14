@@ -147,7 +147,9 @@ export const RANGE_BY_INTERVAL: Record<Interval, string[]> = {
 };
 
 const cache = new Map<string, { at: number; data: Candle[] }>();
-const CACHE_TTL = 60_000;
+// 15분봉은 Yahoo가 15-20분 지연 데이터 제공하므로, 짧은 캐시(10초)로 최신성 유지
+// (완전 실시간 필요시 KIS 시세 API 사용)
+const CACHE_TTL = 10_000;
 
 /** UTC 타임스탐프 → KST 타임스탐프 (초 단위) */
 function toKST(utcSeconds: number): number {
@@ -218,11 +220,17 @@ export interface Quote {
 }
 
 export async function fetchQuote(symbol: string): Promise<Quote> {
-  const { candles, demo } = await fetchCandles(symbol, '1d', '5d');
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
+  // 일봉은 마감 전까지 전날 데이터만 제공하므로, 15분봉의 최신 데이터를 사용
+  // (Yahoo는 15-20분 지연 데이터지만, 일봉보다는 훨씬 현재에 가까움)
+  const { candles: intraCandles, demo } = await fetchCandles(symbol, '15m', '60d');
+  const last = intraCandles[intraCandles.length - 1];
+
+  // prevClose는 전일 종가 필요 — 일봉에서 한 봉 전 확인
+  const { candles: dailyCandles } = await fetchCandles(symbol, '1d', '5d');
+  const prevDaily = dailyCandles[dailyCandles.length - 2];
+  const prevClose = prevDaily?.close ?? last?.close ?? 0;
+
   const price = last?.close ?? 0;
-  const prevClose = prev?.close ?? price;
   const volume = last?.volume ?? 0;
   return {
     symbol, price, prevClose,
