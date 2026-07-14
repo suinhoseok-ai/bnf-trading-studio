@@ -175,6 +175,16 @@ export function slowStochArr(highs: number[], lows: number[], closes: number[], 
   return { k: slowK, d: slowD };
 }
 
+/** MACD (12,26,9 기본): line=EMA12-EMA26, signal=EMA9(line), hist=line-signal */
+export function macdArr(closes: number[], fast = 12, slow = 26, signal = 9): { line: number[]; signal: number[]; hist: number[] } {
+  const emaFast = emaArr(closes, fast);
+  const emaSlow = emaArr(closes, slow);
+  const line = emaFast.map((v, i) => v - emaSlow[i]);
+  const sig = emaArr(line, signal);
+  const hist = line.map((v, i) => v - sig[i]);
+  return { line, signal: sig, hist };
+}
+
 /** OBV (On Balance Volume) */
 export function obvArr(closes: number[], volumes: number[]): number[] {
   const out: number[] = new Array(closes.length).fill(0);

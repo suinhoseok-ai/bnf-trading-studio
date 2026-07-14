@@ -1,73 +1,59 @@
-// ===== 전략6: 과매도 반등 + 시장 필터 (Oversold Rebound & Market Filter) =====
-// 하락장(KOSPI < 200일선)에서 개별 종목이 5일선 아래 + RSI(2) ≤ 10 극단 과매도일 때 매수.
-// 종가가 5일선 위로 회복하면 익절, 최대 5영업일 시간 청산. (래리 코너스 RSI2 계열 역추세 전략)
+// ===== 전략6: (하락) 과매도 반등 (Oversold Rebound) =====
+// 5일 -8%↑/10일 -12%↑ 급락 + RSI(14)≤25 + 볼린저 하단 이탈 후 재진입 + 거래량 Z≥2.5(투매) + 반등캔들.
+// 반등봉 저가 이탈/-2.5% 손절, 분할익절(+2.5%/+5%) 후 MA5 이탈 잔량 청산, 2거래일 무조건 전량 시간청산.
 import type { Candle } from '../types';
-import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan, CandleFetcher } from './types';
-import { calcShares, starsFromScore, smaAt, dailyChangePct } from './engine';
+import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
+import { calcShares, starsFromScore, smaAt, stddevAt, rsiSimple, volumeZScoreAt, detectCandle, daysElapsed, dailyChangePct } from './engine';
 
-const PARAMS = { rsiPeriod: 2, rsiThresh: 10, smaPeriod: 5, indexSma: 200, maxDays: 5, positionPct: 20 };
-const INDEX_SYMBOL = '^KS11'; // KOSPI 지수
-const INDEX_TTL = 10 * 60_000;
-
-// ── 시장 지수 캐시 (init 으로 채움) ──
-let indexBars: { time: number; close: number; sma200: number | null }[] = [];
-let indexLoadedAt = 0;
-
-async function init(fetch: CandleFetcher): Promise<void> {
-  if (indexBars.length > 0 && Date.now() - indexLoadedAt < INDEX_TTL) return;
-  try {
-    const candles = await fetch(INDEX_SYMBOL, '1d', '2y');
-    const closes = candles.map((c) => c.close);
-    indexBars = candles.map((c, i) => ({ time: c.time, close: c.close, sma200: smaAt(closes, PARAMS.indexSma, i) }));
-    indexLoadedAt = Date.now();
-  } catch { /* 지수 조회 실패 시 기존 캐시 유지 (없으면 시장필터 판단 불가 → 신호 없음) */ }
-}
-
-/** 해당 시점 기준 하락장 여부 (지수 종가 < 지수 SMA200). 판단 불가 시 null */
-function bearAt(time: number): boolean | null {
-  if (indexBars.length === 0) return null;
-  let lo = 0, hi = indexBars.length - 1, ans = -1;
-  while (lo <= hi) {
-    const mid = (lo + hi) >> 1;
-    if (indexBars[mid].time <= time + 43_200) { ans = mid; lo = mid + 1; } else hi = mid - 1;
-  }
-  if (ans < 0) return null;
-  const b = indexBars[ans];
-  return b.sma200 == null ? null : b.close < b.sma200;
-}
-
-/** RSI(N) — 명세서 방식(단순 rolling 평균) */
-function rsiSimple(closes: number[], period: number): (number | null)[] {
-  const gains: number[] = [0], losses: number[] = [0];
-  for (let i = 1; i < closes.length; i++) {
-    const d = closes[i] - closes[i - 1];
-    gains.push(Math.max(d, 0));
-    losses.push(Math.max(-d, 0));
-  }
-  return closes.map((_, i) => {
-    if (i < period) return null;
-    let g = 0, l = 0;
-    for (let j = i - period + 1; j <= i; j++) { g += gains[j]; l += losses[j]; }
-    if (l === 0) return 100;
-    const rs = g / l;
-    return 100 - 100 / (1 + rs);
-  });
-}
+const PARAMS = {
+  drop5: 8, drop10: 12, rsiMax: 25, bbPeriod: 20, bbMult: 2, volZMin: 2.5,
+  gapMaxDown: 5, slPct: 2.5, tp1: 2.5, tp2: 5, maxDays: 2, positionPct: 10,
+};
 
 function compute(candles: Candle[]): StratRow[] {
   const closes = candles.map((c) => c.close);
-  const rsi2 = rsiSimple(closes, PARAMS.rsiPeriod);
+  const volumes = candles.map((c) => c.volume);
+  const ma5 = closes.map((_, i) => smaAt(closes, 5, i));
+  const bbMa = closes.map((_, i) => smaAt(closes, PARAMS.bbPeriod, i));
+  const bbSd = closes.map((_, i) => stddevAt(closes, PARAMS.bbPeriod, i));
+  const bbLower = bbMa.map((m, i) => (m != null && bbSd[i] != null ? m - PARAMS.bbMult * (bbSd[i] as number) : null));
+  const rsi = rsiSimple(closes, 14);
+
   return candles.map((c, i) => {
-    const sma5 = smaAt(closes, PARAMS.smaPeriod, i);
-    const bear = bearAt(c.time);
-    const r = rsi2[i];
-    const buy = bear === true && sma5 != null && c.close < sma5 && r != null && r <= PARAMS.rsiThresh;
+    const ret5 = i >= 5 && closes[i - 5] > 0 ? ((c.close - closes[i - 5]) / closes[i - 5]) * 100 : null;
+    const ret10 = i >= 10 && closes[i - 10] > 0 ? ((c.close - closes[i - 10]) / closes[i - 10]) * 100 : null;
+    const dropOk = (ret5 != null && ret5 <= -PARAMS.drop5) || (ret10 != null && ret10 <= -PARAMS.drop10);
+
+    const rsiOk = rsi[i] != null && (rsi[i] as number) <= PARAMS.rsiMax;
+
+    // 볼린저 하단 이탈 후 재진입: 직전 3봉 내 하단 이탈이 있었고, 당일은 밴드 안으로 복귀
+    const brokeLowerRecently = bbLower[i] != null && (() => {
+      for (let j = Math.max(0, i - 3); j < i; j++) if (bbLower[j] != null && candles[j].close < (bbLower[j] as number)) return true;
+      return false;
+    })();
+    const reenteredBand = bbLower[i] != null && c.close >= (bbLower[i] as number);
+
+    const volZ = volumeZScoreAt(volumes, 20, i);
+    const capitulation = volZ != null && volZ >= PARAMS.volZMin;
+
+    const prev = i > 0 ? candles[i - 1] : undefined;
+    const pattern = detectCandle(c, prev);
+    const reboundCandle = pattern.longLowerWick || pattern.bullishEngulfing;
+
+    const gapPct = prev && prev.close > 0 ? ((c.open - prev.close) / prev.close) * 100 : 0;
+    const gapOk = gapPct > -PARAMS.gapMaxDown;
+
+    const buy = !!(dropOk && rsiOk && brokeLowerRecently && reenteredBand && capitulation && reboundCandle && gapOk);
+    const exit = ma5[i] != null && c.close < (ma5[i] as number);
+
     return {
       time: c.time, open: c.open, high: c.high, low: c.low, close: c.close, volume: c.volume,
-      buy,
-      exit: sma5 != null && c.close > sma5, // 5일선 회복 = 평균 회귀 익절 신호
-      lines: { sma5 },
-      m: { rsi2: r, sma5, bear: bear == null ? null : bear ? 1 : 0 },
+      buy, exit,
+      lines: { ma5: ma5[i], bbLower: bbLower[i] },
+      m: {
+        ret5, ret10, rsi: rsi[i], volZ, capitulation: capitulation ? 1 : 0, reboundCandle: reboundCandle ? 1 : 0,
+        bbReentry: brokeLowerRecently && reenteredBand ? 1 : 0, ma5: ma5[i],
+      },
     };
   });
 }
@@ -75,47 +61,68 @@ function compute(candles: Candle[]): StratRow[] {
 function planEntry(rows: StratRow[], i: number, cash: number): EntryPlan | null {
   const row = rows[i];
   const entry = row.close;
+  const sl = Math.max(row.low, entry * (1 - PARAMS.slPct / 100));
+  if (sl >= entry) return null;
   const shares = calcShares(cash, PARAMS.positionPct, entry);
   if (shares <= 0) return null;
-  // 가격 손절 없음 — 5일선 회복 익절 + 최대 5영업일 시간 청산 (sl=0 은 미발동)
-  return { entry_price: entry, shares, sl: 0, note: `과매도 반등 매수 (RSI2 ${row.m.rsi2 != null ? (row.m.rsi2 as number).toFixed(1) : '-'}) · 5일선 회귀 목표 · 최대 ${PARAMS.maxDays}일 보유` };
+  return { entry_price: entry, shares, sl, note: `과매도 투매 반등 매수 · 손절가 ${Math.round(sl).toLocaleString('ko-KR')}` };
 }
 
 function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: OpenPos | null } {
+  const events: ExitEvent[] = [];
+  let { shares, tp1_hit } = pos;
   const entry = pos.entry_price;
-  const sma5 = row.lines.sma5;
-  // 1. 평균 회귀 익절 (종가 > 5일선)
-  if (sma5 != null && row.close > sma5) {
-    return { events: [{ side: 'SELL_TP2', price: row.close, shares: pos.shares, pnl: pos.shares * (row.close - entry), note: '5일선 회복 익절', time: row.time }], updated: null };
+  const ma5 = row.lines.ma5;
+
+  if (row.close <= pos.sl) {
+    events.push({ side: 'SELL_SL', price: row.close, shares, pnl: shares * (row.close - entry), note: '손절 청산', time: row.time });
+    return { events, updated: null };
   }
-  // 2. 시간 청산 (최대 5영업일 ≈ 7일)
-  const days = (row.time - Math.floor(new Date(pos.opened_at).getTime() / 1000)) / 86400;
-  if (days >= PARAMS.maxDays + 2) {
-    return { events: [{ side: 'SELL_SL', price: row.close, shares: pos.shares, pnl: pos.shares * (row.close - entry), note: '기간 만료 강제 청산', time: row.time }], updated: null };
+  const profitPct = ((row.close - entry) / entry) * 100;
+  if (!tp1_hit && profitPct >= PARAMS.tp1) {
+    const half = shares * 0.4;
+    events.push({ side: 'SELL_TP1', price: row.close, shares: half, pnl: half * (row.close - entry), note: `+${PARAMS.tp1}% 40% 익절`, time: row.time });
+    shares -= half;
+    tp1_hit = true;
   }
-  return { events: [], updated: pos };
+  if (tp1_hit && profitPct >= PARAMS.tp2 && shares > 0) {
+    const chunk = shares * (0.3 / 0.6);
+    const sell = Math.min(shares, chunk);
+    events.push({ side: 'SELL_TP1', price: row.close, shares: sell, pnl: sell * (row.close - entry), note: `+${PARAMS.tp2}% 추가 익절`, time: row.time });
+    shares -= sell;
+  }
+  if (shares > 0 && ma5 != null && row.close < ma5) {
+    events.push({ side: 'SELL_TP2', price: row.close, shares, pnl: shares * (row.close - entry), note: 'MA5 이탈 잔량 청산', time: row.time });
+    return { events, updated: null };
+  }
+  const days = daysElapsed(row.time, pos.opened_at);
+  if (shares > 0 && days >= PARAMS.maxDays) {
+    events.push({ side: 'SELL_TP2', price: row.close, shares, pnl: shares * (row.close - entry), note: '2거래일 경과 무조건 전량 청산', time: row.time });
+    return { events, updated: null };
+  }
+  if (shares <= 0) return { events, updated: null };
+  return { events, updated: { ...pos, shares, tp1_hit } };
 }
 
 function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
   const price = last?.close ?? 0;
   const changePct = dailyChangePct(rows);
-  const r = (last?.m.rsi2 ?? null) as number | null;
-  const sma5 = (last?.m.sma5 ?? null) as number | null;
-  const bear = last?.m.bear;
-
-  const isBear = bear === 1;
-  const belowSma = sma5 != null && last.close < sma5;
-  const oversold = r != null && r <= PARAMS.rsiThresh;
-  const panic = r != null && r <= 5;
-  const recentSignal = rows.slice(-5).some((x) => x.buy);
+  const ret5 = last?.m.ret5 ?? null;
+  const ret10 = last?.m.ret10 ?? null;
+  const dropOk = (ret5 != null && ret5 <= -PARAMS.drop5) || (ret10 != null && ret10 <= -PARAMS.drop10);
+  const rsi = last?.m.rsi ?? null;
+  const rsiOk = rsi != null && rsi <= PARAMS.rsiMax;
+  const volZ = last?.m.volZ ?? null;
+  const capitulation = last?.m.capitulation === 1;
+  const reboundCandle = last?.m.reboundCandle === 1;
 
   const conditions = [
-    { label: '하락장 국면 (KOSPI < 200일선)', met: isBear, pts: 30 },
-    { label: '종가 < 5일 이동평균선', met: belowSma, pts: 20 },
-    { label: 'RSI(2) ≤ 10 극단 과매도', met: oversold, pts: 35 },
-    { label: 'RSI(2) ≤ 5 공포 클라이맥스', met: panic, pts: 10 },
-    { label: '최근 5봉 내 매수 신호', met: recentSignal, pts: 5 },
+    { label: `5일 -${PARAMS.drop5}%/10일 -${PARAMS.drop10}% 급락`, met: dropOk, pts: 25 },
+    { label: `RSI(14) ≤ ${PARAMS.rsiMax} 과매도`, met: rsiOk, pts: 20 },
+    { label: '볼린저 하단 이탈 후 재진입', met: last?.m.bbReentry === 1, pts: 15 },
+    { label: `거래량 Z ≥ ${PARAMS.volZMin} (투매)`, met: capitulation, pts: 20 },
+    { label: '반등 캔들 (긴 아래꼬리/장악형)', met: reboundCandle, pts: 20 },
   ];
   const score = conditions.reduce((a, c) => a + (c.met ? c.pts : 0), 0);
 
@@ -125,9 +132,9 @@ function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
     exit: last?.exit ?? false,
     score, stars: starsFromScore(score),
     cols: [
-      { value: r != null ? r.toFixed(1) : '-', tone: oversold ? 'accent' : 'default' },
-      { value: sma5 != null ? (belowSma ? '아래' : '위') : '-', tone: belowSma ? 'down' : 'up' },
-      { value: bear == null ? '판단불가' : isBear ? '하락장' : '상승장', tone: bear == null ? 'muted' : isBear ? 'accent' : 'up' },
+      { value: ret5 != null ? ret5.toFixed(1) + '%' : '-', tone: dropOk ? 'accent' : 'default' },
+      { value: rsi != null ? rsi.toFixed(0) : '-', tone: rsiOk ? 'accent' : 'default' },
+      { value: volZ != null ? volZ.toFixed(1) + 'σ' : '-', tone: capitulation ? 'up' : 'muted' },
     ],
     conditions,
   };
@@ -135,22 +142,23 @@ function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
 
 export const rebound: StrategyModule = {
   code: 'rebound',
-  name: '전략6 · 과매도 반등 + 시장 필터',
-  short: '하락장(KOSPI<200일선) 전용 역추세: 5일선 아래 + RSI(2)≤10 극단 과매도 매수 → 5일선 회복 익절, 최대 5영업일 시간 청산.',
+  name: '전략6 · (하락) 과매도 반등',
+  short: '일봉 기준 5일 -8%/10일 -12% 급락 + RSI(14)≤25 + 볼린저 하단 이탈 후 재진입 + 거래량 Z≥2.5(투매) + 반등캔들 시 매수. 분할익절(+2.5%/+5%) 후 MA5 이탈 잔량 청산, 2거래일 무조건 전량 시간청산.',
   interval: '1d',
   range: '1y',
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'BEAR', risk: 4,
   lineStyles: [
-    { key: 'sma5', color: '#f59e0b', width: 2, label: 'SMA5 (회귀 목표)' },
+    { key: 'ma5', color: '#f59e0b', width: 2, label: 'MA5' },
+    { key: 'bbLower', color: '#22c55e', width: 1, label: '볼린저 하단' },
   ],
-  colHeaders: ['RSI(2)', '5일선 대비', '시장국면'],
+  colHeaders: ['5일등락', 'RSI', '거래량Z'],
   rules: [
-    { tag: '①', color: 'text-accent', title: '시장 필터', body: 'KOSPI 지수가 200일 이동평균선 아래(하락장)일 때만 작동하는 하락장 전용 헤지 전략.' },
-    { tag: '②', color: 'text-accent', title: '진입', body: '종가가 5일선 아래에 있고 RSI(2)가 10 이하로 떨어진 극단적 공포 시점에 가용 현금 20% 매수.' },
-    { tag: '③', color: 'text-profit', title: '익절', body: '종가가 5일 이동평균선 위로 회복 마감하면 미련 없이 전량 익절 (평균 회귀).' },
-    { tag: '④', color: 'text-amber-400', title: '시간 청산', body: '가격 손절 대신 시간으로 자름: 5영업일 내 회복 실패 시 손익 무관 강제 청산.' },
+    { tag: '①', color: 'text-accent', title: '진입', body: '5일 -8% 또는 10일 -12% 이상 급락 + RSI(14)≤25 + 볼린저 하단 이탈 후 밴드 안 재진입 + 거래량 Z-score 2.5 이상(투매 확인) + 반등 캔들(긴 아래꼬리/장악형) 시 가용 현금 10% 매수. 갭하락 -5% 초과 시 제외.' },
+    { tag: '②', color: 'text-amber-400', title: '손절', body: 'max(반등봉 저가, 진입가 -2.5%) 중 타이트한 값.' },
+    { tag: '③', color: 'text-profit', title: '분할 익절', body: '+2.5% 도달 시 40%, +5% 도달 시 추가 익절. 잔여는 MA5 종가 이탈 시 전량 청산.' },
+    { tag: '④', color: 'text-slate-300', title: '시간 청산', body: '2거래일 경과 시 수익 여부와 무관하게 잔여 물량 무조건 전량 청산 (추세전환 기대 금지 원칙).' },
   ],
-  init, compute, scan, planEntry, stepOpen,
+  compute, scan, planEntry, stepOpen,
 };
