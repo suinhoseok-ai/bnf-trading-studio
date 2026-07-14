@@ -119,6 +119,15 @@ const sideLabel: Record<ExitEvent['side'], string> = {
   SELL_SL: '손절/청산',
 };
 
+/**
+ * side(TP1/TP2/SL)만으로 라벨을 정하면, 추세기반 청산(20일선 이탈 등)이
+ * 손실 상태에서 발생해도 '익절'로 표시되는 오류가 생긴다. 실제 pnl 부호로 보정한다.
+ */
+function exitLabel(side: ExitEvent['side'], pnl: number): string {
+  if (pnl < 0 && side !== 'SELL_SL') return '청산(손실)';
+  return sideLabel[side];
+}
+
 export function simulate(mod: StrategyModule, rows: StratRow[], initialBalance: number): BacktestResult {
   let cash = initialBalance;
   let pos: OpenPos | null = null;
@@ -155,7 +164,7 @@ export function simulate(mod: StrategyModule, rows: StratRow[], initialBalance: 
         roundPnl += ev.pnl;
         const type: TradeEvent['type'] = ev.side === 'SELL_TP1' ? 'TP1' : ev.side === 'SELL_TP2' ? 'TP2' : 'SL';
         trades.push({ time: ev.time, type, price: ev.price, shares: ev.shares, pnl: ev.pnl, note: ev.note });
-        logs.push(`[${sideLabel[ev.side]}] ${fmtTime(ev.time)} | 가격 ${fmt(ev.price)} | 손익 ${fmt(ev.pnl)} | ${ev.note}`);
+        logs.push(`[${exitLabel(ev.side, ev.pnl)}] ${fmtTime(ev.time)} | 가격 ${fmt(ev.price)} | 손익 ${fmt(ev.pnl)} | ${ev.note}`);
       }
       if (step.updated == null) {
         roundResults.push(roundPnl);

@@ -14,6 +14,15 @@ const sideLabel: Record<string, { text: string; cls: string }> = {
   FORCE_SELL: { text: '강제매도', cls: 'bg-red-500/20 text-red-400' },
 };
 
+/** side(TP1/TP2)만으로 라벨을 정하면 손실 상태의 추세청산도 '익절'로 보인다. 실제 pnl 부호로 보정. */
+function tradeLabel(side: string, pnl: number): { text: string; cls: string } {
+  const base = sideLabel[side] ?? { text: side, cls: 'bg-edge text-slate-300' };
+  if ((side === 'SELL_TP1' || side === 'SELL_TP2') && pnl < 0) {
+    return { text: '청산(손실)', cls: 'bg-amber-500/20 text-amber-400' };
+  }
+  return base;
+}
+
 const RANGE_OPTIONS: { key: string; label: string; days: number | null }[] = [
   { key: '7d', label: '최근 7일', days: 7 },
   { key: '30d', label: '1개월', days: 30 },
@@ -81,7 +90,7 @@ export default function TradingHistoryPage() {
   const buyTrades = trades.filter((t) => t.side === 'BUY');
   const sellTrades = trades.filter((t) => t.side !== 'BUY');
   const realizedPnl = sellTrades.reduce((sum, t) => sum + Number(t.pnl), 0);
-  const wins = sellTrades.filter((t) => (t.side === 'FORCE_SELL' ? Number(t.pnl) > 0 : t.side === 'SELL_TP1' || t.side === 'SELL_TP2')).length;
+  const wins = sellTrades.filter((t) => Number(t.pnl) > 0).length;
   const winRate = sellTrades.length > 0 ? (wins / sellTrades.length) * 100 : 0;
   const alertLogs = logs.filter((l) => l.level === 'warn' || l.level === 'error').length;
 
@@ -140,7 +149,7 @@ export default function TradingHistoryPage() {
                 <td className="td text-slate-400">{new Date(t.executed_at).toLocaleString('ko-KR')}</td>
                 <td className="td"><span className={`badge ${t.mode === 'real' ? 'bg-red-500/20 text-red-400' : 'bg-edge text-slate-400'}`}>{t.mode === 'real' ? '실전' : '모의'}</span></td>
                 <td className="td text-ink">{t.name || t.symbol}</td>
-                <td className="td"><span className={`badge ${sideLabel[t.side]?.cls ?? 'bg-edge text-slate-300'}`}>{sideLabel[t.side]?.text ?? t.side}</span></td>
+                <td className="td"><span className={`badge ${tradeLabel(t.side, Number(t.pnl)).cls}`}>{tradeLabel(t.side, Number(t.pnl)).text}</span></td>
                 <td className="td">{t.qty}주</td>
                 <td className="td">{fmt(Number(t.order_price))}</td>
                 <td className={`td font-bold ${Number(t.pnl) > 0 ? 'text-up' : Number(t.pnl) < 0 ? 'text-down' : 'text-slate-400'}`}>{fmt(Number(t.pnl))}원</td>
