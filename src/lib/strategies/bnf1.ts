@@ -2,7 +2,7 @@
 import type { Candle } from '../types';
 import { calcIndicators } from '../indicators';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
-import { calcShares, starsFromScore } from './engine';
+import { calcShares, starsFromScore, dailyChangePct } from './engine';
 
 const PARAMS = { period: 20, stddev: 2, bwLookback: 100, bwPercentile: 25, riskReward: 2, positionPct: 10, minExpectedReturnPct: 0.8 };
 
@@ -72,7 +72,7 @@ function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
   const prev = rows[rows.length - 2];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const bandwidths = rows.map((r) => (r.m.bandwidth ?? null));
   const rank = bwPercentRankLocal(bandwidths);
 

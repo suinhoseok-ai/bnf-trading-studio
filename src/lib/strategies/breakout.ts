@@ -2,7 +2,7 @@
 // 60일 최고가 상향 돌파 + 거래량 2.5배 급증 시 매수. 돌파캔들 저가 손절, EMA20 이탈 시 추세 청산.
 import type { Candle } from '../types';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
-import { calcShares, starsFromScore, emaArr, maxOfPrev, meanOfPrev } from './engine';
+import { calcShares, starsFromScore, emaArr, maxOfPrev, meanOfPrev, dailyChangePct } from './engine';
 
 const PARAMS = { resPeriod: 60, volMaPeriod: 20, volMult: 2.5, emaPeriod: 20, positionPct: 20 };
 
@@ -53,9 +53,8 @@ function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: 
 
 function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const highest = last?.m.highest ?? null;
   const ema20 = last?.m.ema20 ?? null;
   const volRatio = last?.m.volRatio ?? null;

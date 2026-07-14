@@ -2,7 +2,7 @@
 // 5>20>60>120 완전정배열 전환 초입 매수(이격도 필터). 20일선 이탈 50% 익절, 데드크로스/60일선 이탈 전량 청산.
 import type { Candle } from '../types';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
-import { calcShares, starsFromScore, smaAt } from './engine';
+import { calcShares, starsFromScore, smaAt, dailyChangePct } from './engine';
 
 const PARAMS = { ma1: 5, ma2: 20, ma3: 60, ma4: 120, disparityLimit: 108, positionPct: 30 };
 
@@ -75,9 +75,8 @@ function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: 
 
 function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const disparity = last?.m.disparity ?? null;
   const ma5 = last?.m.ma5 ?? null, ma20 = last?.m.ma20 ?? null, ma60 = last?.m.ma60 ?? null, ma120 = last?.m.ma120 ?? null;
 

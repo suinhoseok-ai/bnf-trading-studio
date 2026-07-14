@@ -8,7 +8,7 @@
 //    (엄격한 0선 상향 교차는 급락 후 가격이 이미 크게 회복된 뒤에야 발생하여 과매도 조건과 동시 성립이 불가능하다.)
 import type { Candle } from '../types';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan, CandleFetcher } from './types';
-import { calcShares, starsFromScore, emaArr, smaAt, minOfPrev, rsiSimple } from './engine';
+import { calcShares, starsFromScore, emaArr, smaAt, minOfPrev, rsiSimple, dailyChangePct } from './engine';
 
 const PARAMS = {
   emaPeriod: 25, rsiPeriod: 14, rsiThresh: 30,
@@ -110,7 +110,7 @@ function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const prev = rows[rows.length - 2];
   const prev2 = rows[rows.length - 3];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const disparity = last?.m.disparity ?? null;
   const rsi = last?.m.rsi ?? null;
   const hist = last?.m.macdHist ?? null;

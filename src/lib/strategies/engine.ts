@@ -92,6 +92,25 @@ export function percentile(sorted: number[], p: number): number {
 
 export const starsFromScore = (score: number) => Math.max(1, Math.min(5, Math.round(score / 20)));
 
+/**
+ * StratRow 배열(15분봉 등 인트라데이)에서 "전일 대비 등락률(%)"을 계산한다.
+ * 바로 이전 봉(15분 전)과 비교하면 값이 항상 0에 가깝게 나오므로,
+ * 날짜별로 그룹핑해 가장 최근 완료된 거래일의 마지막 종가와 비교한다.
+ */
+export function dailyChangePct(rows: StratRow[]): number {
+  const last = rows[rows.length - 1];
+  if (!last) return 0;
+  const dateStr = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+  const todayStr = dateStr(last.time);
+  for (let i = rows.length - 2; i >= 0; i--) {
+    if (dateStr(rows[i].time) !== todayStr) {
+      const prevClose = rows[i].close;
+      return prevClose ? ((last.close - prevClose) / prevClose) * 100 : 0;
+    }
+  }
+  return 0;
+}
+
 // ── 제네릭 백테스트 ──
 const fmt = (n: number) => n.toLocaleString('ko-KR', { maximumFractionDigits: 0 });
 const sideLabel: Record<ExitEvent['side'], string> = {

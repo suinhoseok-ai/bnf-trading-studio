@@ -3,7 +3,7 @@
 // 종가가 5일선 위로 회복하면 익절, 최대 5영업일 시간 청산. (래리 코너스 RSI2 계열 역추세 전략)
 import type { Candle } from '../types';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan, CandleFetcher } from './types';
-import { calcShares, starsFromScore, smaAt } from './engine';
+import { calcShares, starsFromScore, smaAt, dailyChangePct } from './engine';
 
 const PARAMS = { rsiPeriod: 2, rsiThresh: 10, smaPeriod: 5, indexSma: 200, maxDays: 5, positionPct: 20 };
 const INDEX_SYMBOL = '^KS11'; // KOSPI 지수
@@ -98,9 +98,8 @@ function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: 
 
 function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const r = (last?.m.rsi2 ?? null) as number | null;
   const sma5 = (last?.m.sma5 ?? null) as number | null;
   const bear = last?.m.bear;

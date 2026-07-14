@@ -2,7 +2,7 @@
 // 정배열(EMA20>EMA60) 상승 추세에서 EMA20 눌림목 + 스토캐스틱 골든크로스 매수. 시간 청산(7영업일) 포함.
 import type { Candle } from '../types';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
-import { calcShares, starsFromScore, emaArr, smaAt } from './engine';
+import { calcShares, starsFromScore, emaArr, smaAt, dailyChangePct } from './engine';
 
 const PARAMS = { emaShort: 20, emaLong: 60, stochK: 14, stochSmooth: 3, maxDays: 7, positionPct: 20 };
 
@@ -76,9 +76,8 @@ function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: 
 
 function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const ema20 = last?.m.ema20 ?? null;
   const ema60 = last?.m.ema60 ?? null;
   const k = last?.m.slowK ?? null;

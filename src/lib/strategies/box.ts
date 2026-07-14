@@ -2,7 +2,7 @@
 // 조밀한 박스권(높이 15% 이내) 상단을 거래량 1.5배와 함께 돌파 시 매수. 박스 중간값 손절, EMA20 이탈 청산.
 import type { Candle } from '../types';
 import type { StrategyModule, StratRow, OpenPos, ExitEvent, EntryPlan, StratScan } from './types';
-import { calcShares, starsFromScore, emaArr, maxOfPrev, minOfPrev, meanOfPrev } from './engine';
+import { calcShares, starsFromScore, emaArr, maxOfPrev, minOfPrev, meanOfPrev, dailyChangePct } from './engine';
 
 const PARAMS = { boxPeriod: 20, maxHeight: 15, volMult: 1.5, emaPeriod: 20, positionPct: 25 };
 
@@ -59,9 +59,8 @@ function stepOpen(pos: OpenPos, row: StratRow): { events: ExitEvent[]; updated: 
 
 function scan(symbol: string, name: string, rows: StratRow[]): StratScan {
   const last = rows[rows.length - 1];
-  const prev = rows[rows.length - 2];
   const price = last?.close ?? 0;
-  const changePct = prev ? ((last.close - prev.close) / prev.close) * 100 : 0;
+  const changePct = dailyChangePct(rows);
   const boxHeight = last?.m.boxHeight ?? null;
   const boxTop = last?.m.boxTop ?? null;
   const ema20 = last?.m.ema20 ?? null;
