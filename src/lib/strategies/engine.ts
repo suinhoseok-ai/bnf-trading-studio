@@ -213,6 +213,59 @@ export function volumeZScoreAt(volumes: number[], lookback: number, idx: number)
   return (volumes[idx] - mean) / sd;
 }
 
+// ── Phase 3 공통 리스크 필터 (일봉 전략 전용 헬퍼 — planEntry에서 호출) ──
+// 15분봉 전략(bnf1/openbrk)은 봉=거래일이 아니므로 이 헬퍼를 쓰지 않고 자체 필터를 둔다.
+export interface RiskCheckResult { ok: boolean; reason?: string }
+
+/**
+ * 공용 진입 전 리스크 체크 (일봉 rows 기준, i번째 봉에 진입 가정):
+ * 1) 손익비(reward/risk) < 1.5 스킵
+ * 2) 당일 ATR(14) > 20일 평균 ATR × 2.5 스킵 (변동성 폭주)
+ * 3) 당일 시가 갭이 전일 종가 대비 -5%~+5% 밖이면 스킵
+ * 4) 최근 5봉 수익률 ≥ +25% 또는 RSI(14) ≥ 80 스킵 (과열)
+ */
+export function commonRiskCheck(rows: { open: number; high: number; low: number; close: number }[], i: number, entry: number, targetPrice: number, slPrice: number): RiskCheckResult {
+  const risk = entry - slPrice;
+  const reward = targetPrice - entry;
+  if (risk <= 0 || reward <= 0 || reward / risk < 1.5) return { ok: false, reason: '손익비 1.5 미만' };
+
+  if (i > 0) {
+    const highs = rows.map((r) => r.high), lows = rows.map((r) => r.low), closes = rows.map((r) => r.close);
+    const atr = atrArr(highs, lows, closes, 14);
+    const atrNow = atr[i];
+    const atrAvg20 = meanOfPrev(atr.map((v) => v ?? 0), 20, i);
+    if (atrNow != null && atrAvg20 != null && atrAvg20 > 0 && atrNow > atrAvg20 * 2.5) {
+      return { ok: false, reason: 'ATR 변동성 폭주 (평균 대비 2.5배 초과)' };
+    }
+    const prevClose = closes[i - 1];
+    if (prevClose > 0) {
+      const gapPct = ((rows[i].open - prevClose) / prevClose) * 100;
+      if (gapPct < -5 || gapPct > 5) return { ok: false, reason: `과도한 갭 (${gapPct.toFixed(1)}%)` };
+    }
+  }
+  if (i >= 5) {
+    const closes = rows.map((r) => r.close);
+    const ret5 = closes[i - 5] > 0 ? ((closes[i] - closes[i - 5]) / closes[i - 5]) * 100 : 0;
+    if (ret5 >= 25) return { ok: false, reason: `최근 5봉 급등 (+${ret5.toFixed(1)}%) 과열` };
+    const rsi = rsiSimple(closes, 14);
+    const rsiNow = rsi[i];
+    if (rsiNow != null && rsiNow >= 80) return { ok: false, reason: `RSI 과열 (${rsiNow.toFixed(0)})` };
+  }
+  return { ok: true };
+}
+
+/** 진입 후 경과 일수 (달력일 기준, 봉 주기 무관) */
+export function daysElapsed(rowTime: number, openedAtIso: string): number {
+  return (rowTime - Math.floor(new Date(openedAtIso).getTime() / 1000)) / 86400;
+}
+
+/** ATR 트레일링 스탑: 고가 갱신 시마다 (최고가 - ATR×mult)로 손절선을 끌어올린다 (하향 조정은 하지 않음) */
+export function atrTrailSl(currentSl: number, highestSinceEntry: number, atrNow: number | null, mult = 2): number {
+  if (atrNow == null) return currentSl;
+  const trail = highestSinceEntry - atrNow * mult;
+  return Math.max(currentSl, trail);
+}
+
 export interface CandlePattern {
   hammer: boolean;          // 아래꼬리 긴 반전형 (몸통 대비 아래꼬리 2배 이상, 윗꼬리 짧음)
   bullishEngulfing: boolean; // 전일 음봉 몸통을 당일 양봉 몸통이 완전히 감쌈

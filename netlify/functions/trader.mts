@@ -19,6 +19,7 @@ import { starsFromScore } from '../../src/lib/strategies/engine';
 import { universeStocks } from '../../src/lib/marketData';
 import { isKoreanMarketOpen } from '../../src/lib/market-hours';
 import { getAdapter, decryptSecret, toKrCode, BrokerAdapter, BrokerCredentials, TokenCache } from '../../src/lib/broker';
+import { judgeMarket, type Regime } from '../../src/lib/marketRegime';
 
 export const config = { schedule: '*/10 * * * *' };
 
@@ -123,6 +124,16 @@ export default async () => {
     const c = await fetchCandlesServer(symbol, interval, range);
     candleCache.set(k, c);
     return c;
+  };
+
+  // 시장국면 게이트: 이번 회차 매수 트리거 판단에 사용할 KOSPI 국면(1회만 조회, 실패 시 게이트 없이 진행)
+  let currentRegime: Regime | null = null;
+  try {
+    const { data: regimeRow } = await sb.from('bnf_market_regime')
+      .select('kospi_regime').order('judged_at', { ascending: false }).limit(1).maybeSingle();
+    currentRegime = (regimeRow?.kospi_regime as Regime | undefined)
+      ?? (await judgeMarket(fetchCandlesServer, '^KS11', 'KOSPI')).regime;
+  } catch { /* 게이트 없이 진행 (판정 실패는 매수를 막지 않음) */
   };
 
   for (const uid of uids) {
@@ -233,6 +244,13 @@ export default async () => {
         const stratLog = (level: string, event: string, detail: string) => log(level, event, detail);
         try {
           const mod = getStrategy(strat.strategy_code);
+
+          // 시장국면 게이트: 전략의 적정 장세와 현재 KOSPI 국면이 다르면 신규 매수 스킵 (매도는 항상 수행되므로 영향 없음)
+          if (currentRegime && mod.regime !== 'ANY' && mod.regime !== currentRegime) {
+            await stratLog('info', '매수 스킵', `${mod.name}: 시장 국면 불일치 (전략 적정장세=${mod.regime}, 현재=${currentRegime})`);
+            continue;
+          }
+
           await mod.init?.(fetchCandlesServer);
 
           // 이 전략카드의 현재 보유 종목 수 → 슬롯 = 최대보유수 - 보유중
