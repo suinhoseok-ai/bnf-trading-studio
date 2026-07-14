@@ -193,14 +193,30 @@ export async function fetchCandles(
   }
 }
 
+/**
+ * 캔들 배열에서 "가장 최근 완료된 거래일"의 마지막 종가를 구한다 (당일 진행 중인 봉 제외).
+ * Yahoo의 1d(일봉) 집계 데이터는 종목·지수에 따라 특정 거래일이 통째로 누락되는 경우가 있어
+ * (예: 지수(^KS11 등)의 일봉만 특정일 결측), 15분봉처럼 결측 없는 인트라데이 시리즈에서
+ * 날짜별로 그룹핑해 직접 전일 종가를 구하는 편이 더 안정적이다.
+ */
+function lastCompletedDayClose(candles: Candle[]): number | null {
+  if (candles.length === 0) return null;
+  const dateStr = (t: number) => new Date(t * 1000).toISOString().slice(0, 10);
+  const todayStr = dateStr(candles[candles.length - 1].time);
+  for (let i = candles.length - 1; i >= 0; i--) {
+    if (dateStr(candles[i].time) !== todayStr) return candles[i].close;
+  }
+  return null;
+}
+
 // 지수 조회 (KOSPI ^KS11, KOSDAQ ^KQ11)
 export async function fetchIndexQuote(symbol: string): Promise<{ price: number; changePct: number; demo: boolean }> {
-  const { candles, demo } = await fetchCandles(symbol, '1d', '3mo');
+  const { candles, demo } = await fetchCandles(symbol, '15m', '60d');
   const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
+  const prevClose = lastCompletedDayClose(candles);
   return {
     price: last?.close ?? 0,
-    changePct: prev ? ((last.close - prev.close) / prev.close) * 100 : 0,
+    changePct: prevClose ? ((last.close - prevClose) / prevClose) * 100 : 0,
     demo,
   };
 }
@@ -220,15 +236,11 @@ export interface Quote {
 }
 
 export async function fetchQuote(symbol: string): Promise<Quote> {
-  // 일봉은 마감 전까지 전날 데이터만 제공하므로, 15분봉의 최신 데이터를 사용
-  // (Yahoo는 15-20분 지연 데이터지만, 일봉보다는 훨씬 현재에 가까움)
-  const { candles: intraCandles, demo } = await fetchCandles(symbol, '15m', '60d');
-  const last = intraCandles[intraCandles.length - 1];
-
-  // prevClose는 전일 종가 필요 — 일봉에서 한 봉 전 확인
-  const { candles: dailyCandles } = await fetchCandles(symbol, '1d', '5d');
-  const prevDaily = dailyCandles[dailyCandles.length - 2];
-  const prevClose = prevDaily?.close ?? last?.close ?? 0;
+  // 일봉은 마감 전까지 전날 데이터만 제공하고, 종목·지수에 따라 특정일이 통째로 결측되는
+  // 경우가 있으므로(Yahoo 일봉 집계 결함) 15분봉에서 직접 현재가·전일종가를 모두 구한다.
+  const { candles, demo } = await fetchCandles(symbol, '15m', '60d');
+  const last = candles[candles.length - 1];
+  const prevClose = lastCompletedDayClose(candles) ?? last?.close ?? 0;
 
   const price = last?.close ?? 0;
   const volume = last?.volume ?? 0;
