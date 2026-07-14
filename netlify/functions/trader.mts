@@ -17,7 +17,7 @@ import { getStrategy } from '../../src/lib/strategies';
 import type { StratRow, OpenPos } from '../../src/lib/strategies/types';
 import { starsFromScore } from '../../src/lib/strategies/engine';
 import { universeStocks } from '../../src/lib/marketData';
-import { isKoreanMarketOpen } from '../../src/lib/market-hours';
+import { isKoreanMarketOpen, kstNow } from '../../src/lib/market-hours';
 import { getAdapter, decryptSecret, toKrCode, BrokerAdapter, BrokerCredentials, TokenCache } from '../../src/lib/broker';
 import { judgeMarket, type Regime } from '../../src/lib/marketRegime';
 
@@ -192,7 +192,18 @@ export default async () => {
             symbol: p.symbol, name: p.name, entry_price: Number(p.entry_price),
             shares: Number(p.shares), sl: Number(p.sl), tp1_hit: p.tp1_hit, opened_at: p.opened_at,
           };
-          const { events, updated } = pmod.stepOpen(state, last);
+          let { events, updated } = pmod.stepOpen(state, last);
+          // openbrk(시가돌파 단타)는 당일 청산 전략이므로 15:20 이후엔 잔여 물량을 무조건 시장가 전량 청산
+          if ((p.strategy_code || 'bnf1') === 'openbrk' && updated != null) {
+            const k = kstNow();
+            if (k.hour > 15 || (k.hour === 15 && k.minute >= 20)) {
+              events = [{
+                side: 'SELL_TP2', price: last.close, shares: updated.shares,
+                pnl: updated.shares * (last.close - updated.entry_price), note: '장마감 임박 강제 전량 청산 (15:20)', time: last.time,
+              }];
+              updated = null;
+            }
+          }
           if (events.length === 0) continue;
 
           const code = toKrCode(p.symbol);

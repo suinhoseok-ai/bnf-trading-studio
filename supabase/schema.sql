@@ -96,8 +96,46 @@ insert into public.bnf_strategies (code, name, description, enabled, params) val
   ('disparity', '전략7 · 25일 EMA 이격도 낙주',
    '종가가 25 EMA 대비 과도 하락 이격 + 지지선 근접 + RSI(14) 30 이하 + MACD 히스토그램 상향 반전 시 낙주 매수. 지지선 이탈 손절, 1:2 손익비 익절.',
    true,
-   '{"emaPeriod":25,"rsiPeriod":14,"rsiThresh":30,"bullDisparity":20,"bearDisparity":30,"supportLookback":40,"riskReward":2,"positionPct":20}'::jsonb)
+   '{"emaPeriod":25,"rsiPeriod":14,"rsiThresh":30,"bullDisparity":20,"bearDisparity":30,"supportLookback":40,"riskReward":2,"positionPct":20}'::jsonb),
+  ('openbrk', '전략8 · (상승) 시가돌파 단타',
+   '15분봉 근사: 전일 양봉·거래량 급증 종목이 장 초반 시가를 1% 상향 돌파하고 VWAP 위·거래량 급증 시 매수. +2%/+4% 분할익절 후 VWAP 이탈 잔량 청산, 15:20 이후 강제 전량 청산.',
+   true,
+   '{"entryWindowBars":6,"openBreakPct":1,"volZEntryMin":2.0,"prevDayVolZMin":1.5,"gapMin":-1,"gapMax":3,"slOpenPct":1.5,"tp1":2,"tp2":4,"positionPct":8}'::jsonb),
+  ('rangeswing', '전략9 · (횡보) 박스권 스윙',
+   '일봉 기준 최근 25일 박스(폭 6~18%, 상하단 각 2회 이상 터치, 삼각수렴 제외) 하단 근접 + 거래량 감소 + 반등캔들 + RSI 30~50 + Slow Stoch 골든크로스 + CCI -100 회복 시 매수. 박스 중앙/상단 분할익절 후 돌파 시 ATR 트레일, 5일 시간청산.',
+   true,
+   '{"boxPeriod":25,"boxWidthMin":6,"boxWidthMax":18,"touchBand":1.5,"touchMin":2,"nearBottomPct":2,"rsiLo":30,"rsiHi":50,"maxDays":5,"positionPct":15}'::jsonb)
 on conflict (code) do nothing;
+
+-- Phase 3b 업그레이드: 기존 6개 전략의 이름/설명/파라미터를 새 스펙으로 갱신 (재실행 안전 — 항상 최신값으로 덮어씀)
+update public.bnf_strategies set
+  name = '전략2 · (상승) 추세추종 · 신고가 돌파',
+  description = '일봉 정배열 상태에서 60일(또는 ADX≥30 시 20일) 신고가를 거래량 Z≥2·짧은 윗꼬리·RS우위·OBV상승과 함께 돌파 시 매수. +8% 도달 후 10일선 이탈 50% 익절, 잔여 ATR 트레일/60일선 이탈 전량 청산.',
+  params = '{"ma1":20,"ma2":60,"ma3":120,"resLong":60,"resShort":20,"adxShortMin":30,"volZMin":2.0,"positionPct":20}'::jsonb
+where code = 'breakout';
+update public.bnf_strategies set
+  name = '전략3 · (상승) 눌림목 스윙',
+  description = '일봉 정배열(MA5>MA20>MA60)에서 20일 고점 대비 3~8% 건강한 조정(거래량 감소) 후 거래량 급증 반등캔들 + RSI 45~65 + MACD 개선 시 매수. 분할익절(+5%/+8%) 후 MA5 이탈 잔량 청산, 7일 시간청산.',
+  params = '{"ma1":5,"ma2":20,"ma3":60,"pullbackMin":3,"pullbackMax":8,"rsiLo":45,"rsiHi":65,"maxDays":7,"positionPct":20}'::jsonb
+where code = 'pullback';
+update public.bnf_strategies set
+  description = '일봉 5>20>60>120 완전 정배열 완성 후 3봉 이내 초입 매수(이격도·ADX·거래량 필터). 20일선 이탈 50% 익절, 데드크로스/60일선 이탈 전량 청산.',
+  params = '{"ma1":5,"ma2":20,"ma3":60,"ma4":120,"disparityLimit":108,"adxMin":20,"entryWindowBars":3,"positionPct":30}'::jsonb
+where code = 'alignment';
+update public.bnf_strategies set
+  description = '일봉 기준 높이 15% 이내 조밀 박스권 상단을 거래량 Z-score 2 이상·짧은 윗꼬리와 함께 돌파 시 매수. 박스 상단 -1% 재이탈 손절, EMA20 이탈 청산.',
+  params = '{"boxPeriod":20,"maxHeight":15,"volZMin":2.0,"emaPeriod":20,"slBreakoutBuffer":1,"positionPct":25}'::jsonb
+where code = 'box';
+update public.bnf_strategies set
+  name = '전략6 · (하락) 과매도 반등',
+  description = '일봉 기준 5일 -8%/10일 -12% 급락 + RSI(14)≤25 + 볼린저 하단 이탈 후 재진입 + 거래량 Z≥2.5(투매) + 반등캔들 시 매수. 분할익절(+2.5%/+5%) 후 MA5 이탈 잔량 청산, 2거래일 무조건 전량 시간청산.',
+  params = '{"drop5":8,"drop10":12,"rsiMax":25,"volZMin":2.5,"slPct":2.5,"tp1":2.5,"tp2":5,"maxDays":2,"positionPct":10}'::jsonb
+where code = 'rebound';
+update public.bnf_strategies set
+  name = '전략7 · (하락) 낙폭과대 반등',
+  description = '5일 -15%/10일 -20% 낙폭과대 + MA60×0.8 또는 EMA25×0.85 이하 이격 + RSI 20~35 + 볼린저 재진입 + CCI -200→-100 회복 + Slow Stoch 골든크로스 시 매수. 분할익절(+5%/+8%) 후 +12% 또는 MA20 접근 시 전량, 5거래일 시간청산.',
+  params = '{"drop5":15,"drop10":20,"ma60Ratio":0.80,"ema25Ratio":0.85,"rsiLo":20,"rsiHi":35,"maxDays":5,"positionPct":15}'::jsonb
+where code = 'disparity';
 
 -- ------------------------------------------------------------
 -- 3. 사용자별 전략 사용권한 (관리자가 개별 부여/차단)
