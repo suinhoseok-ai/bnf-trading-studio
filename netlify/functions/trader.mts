@@ -308,7 +308,14 @@ export default async () => {
                 if (!plan) continue;
                 const weight = Math.max(1, sig.score) / totalScore;
                 const alloc = Math.min(remainingBudget * weight, cash);
-                const qty = Math.floor(alloc / lastRow.close);
+                // 트리거 판단은 Yahoo(지연) 캔들 기준이지만, 수량은 체결 직전 KIS 실시간가로 계산 +
+                // 2% 안전마진(가격 변동·수수료 여유분)을 둬서 "주문가능금액 초과" 실패를 방지한다.
+                let sizingPrice = lastRow.close;
+                try {
+                  const rt = await withKisRetry(() => adapter.getMarketPrice(sig.symbol));
+                  if (rt > 0) sizingPrice = rt;
+                } catch { /* 실시간가 조회 실패 시 Yahoo 종가로 폴백 */ }
+                const qty = Math.floor((alloc * 0.98) / sizingPrice);
                 if (qty < 1) { await stratLog('warn', '매수 스킵', `${sig.name}: 배분 예산 부족 (배분액 ${Math.round(alloc).toLocaleString('ko-KR')}원 < 1주, 점수 ${sig.score}·★${starsFromScore(sig.score)})`); continue; }
 
                 const r = await withKisRetry(() => adapter.placeBuyOrder(sig.symbol, qty, 0)); // 시장가
