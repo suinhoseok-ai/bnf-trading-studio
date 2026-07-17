@@ -19,7 +19,7 @@ import { starsFromScore } from '../../src/lib/strategies/engine';
 import { universeStocks } from '../../src/lib/marketData';
 import { isKoreanMarketOpen, kstNow } from '../../src/lib/market-hours';
 import { getAdapter, decryptSecret, toKrCode, BrokerAdapter, BrokerCredentials, TokenCache } from '../../src/lib/broker';
-import { judgeMarket, type Regime } from '../../src/lib/marketRegime';
+import { judgeMarket, coarseRegime, type Regime, type RiskState } from '../../src/lib/marketRegime';
 
 export const config = { schedule: '*/10 * * * *' };
 
@@ -91,12 +91,13 @@ interface SettingsRow {
   rg_circuit_enabled: boolean; rg_circuit_drop_pct: number; rg_circuit_block_hours: number; rg_circuit_until: string | null;
   rg_streak_enabled: boolean; rg_streak_losses: number; rg_streak_block_hours: number;
   rg_symbol_cooldown_enabled: boolean; rg_symbol_cooldown_hours: number;
-  rg_bear_major_liquidate: boolean;
+  rg_bear_major_liquidate: boolean; rg_last_liquidated_date: string | null;
 }
 
 interface StrategyRow {
   id: number; strategy_code: string; universe: string;
   interval_min: number; max_positions: number; budget: number; last_run_at: string | null;
+  regime_filter_enabled: boolean;
 }
 
 export default async () => {
@@ -131,15 +132,25 @@ export default async () => {
     return c;
   };
 
-  // 시장국면 게이트: 이번 회차 매수 트리거 판단에 사용할 KOSPI 국면(1회만 조회, 실패 시 게이트 없이 진행)
+  // 시장국면 게이트: 이번 회차 매수 판단에 쓸 KOSPI 확정국면 + 리스크상태 + 직전 확정(대세하락 전이 감지용)
   let currentRegime: Regime | null = null;
+  let riskState: RiskState = 'NORMAL';
+  let regimeTradeDate: string | null = null;
+  let priorConfirmed: Regime | null = null;
   try {
-    const { data: regimeRow } = await sb.from('bnf_market_regime')
-      .select('kospi_regime').order('judged_at', { ascending: false }).limit(1).maybeSingle();
-    currentRegime = (regimeRow?.kospi_regime as Regime | undefined)
-      ?? (await judgeMarket(fetchCandlesServer, '^KS11', 'KOSPI')).regime;
-  } catch { /* 게이트 없이 진행 (판정 실패는 매수를 막지 않음) */
-  };
+    const { data: regimeRows } = await sb.from('bnf_market_regime')
+      .select('kospi_regime, trade_date, risk_state').order('judged_at', { ascending: false }).limit(12);
+    const rows = (regimeRows ?? []) as { kospi_regime: Regime; trade_date: string; risk_state: RiskState }[];
+    if (rows.length > 0) {
+      currentRegime = rows[0].kospi_regime;
+      riskState = rows[0].risk_state ?? 'NORMAL';
+      regimeTradeDate = rows[0].trade_date;
+      priorConfirmed = rows.find((r) => r.trade_date !== rows[0].trade_date)?.kospi_regime ?? null;
+    } else {
+      const j = await judgeMarket(fetchCandlesServer, '^KS11', 'KOSPI');
+      currentRegime = j.candidate; riskState = j.riskState;
+    }
+  } catch { /* 게이트 없이 진행 (판정 실패는 매수를 막지 않음) */ }
 
   // 서킷브레이커용 KOSPI 당일 등락률 (1회만 조회, 실패 시 null → 서킷브레이커 미작동)
   let kospiChangePct: number | null = null;
@@ -182,17 +193,56 @@ export default async () => {
 
       // 이 사용자의 실행 중(RUNNING) + 예산 설정된 전략 카드 (완전 독립 실행 단위)
       const { data: stratRows } = await sb.from('bnf_trading_strategies')
-        .select('id, strategy_code, universe, interval_min, max_positions, budget, last_run_at')
+        .select('id, strategy_code, universe, interval_min, max_positions, budget, last_run_at, regime_filter_enabled')
         .eq('user_id', uid).eq('status', 'RUNNING').gt('budget', 0);
       const strategies = (stratRows ?? []) as StrategyRow[];
 
       // ── 1. 매도 트리거 (보유 전략 포지션) ──
       // 계좌 요약 + 보유 포지션을 단일 API 호출로 함께 조회 (KIS 초당 요청수 제한 대응)
-      const { data: openPos } = await sb.from('bnf_live_positions').select('*').eq('user_id', uid).eq('status', 'OPEN');
+      const { data: openPosRaw } = await sb.from('bnf_live_positions').select('*').eq('user_id', uid).eq('status', 'OPEN');
       const balance = await withKisRetry(() => adapter.getBalance());
       const brokerPositions = balance.positions;
       const account = balance.account;
       const brokerQty = new Map(brokerPositions.map((p) => [p.symbol, p.sellableQty]));
+      let openPos = openPosRaw; // 대세하락장 자동청산으로 일부가 CLOSED 되면 이 배열에서 제거
+
+      // ── 0. 대세하락장(BEAR_MAJOR) 자동 전량청산 (옵트인) ──
+      // 시장국면이 대세하락장으로 "새로 확정"된 그 날 1회만, 장세 자동필터가 켜진 전략의 보유 포지션을 전량 시장가 매도.
+      if (raw.rg_bear_major_liquidate && currentRegime === 'BEAR_MAJOR'
+          && priorConfirmed !== 'BEAR_MAJOR' && regimeTradeDate && raw.rg_last_liquidated_date !== regimeTradeDate) {
+        const { data: offCards } = await sb.from('bnf_trading_strategies')
+          .select('strategy_code').eq('user_id', uid).eq('regime_filter_enabled', false);
+        const filterOffCodes = new Set((offCards ?? []).map((c) => (c as { strategy_code: string }).strategy_code));
+        const liquidated: string[] = [];
+        const remaining: typeof openPosRaw = [];
+        for (const pos of openPosRaw ?? []) {
+          const p = pos as { id: number; symbol: string; name: string; strategy_code: string; entry_price: number; shares: number };
+          if (filterOffCodes.has(p.strategy_code)) { remaining.push(pos); continue; } // 필터 OFF 전략은 제외
+          const code = toKrCode(p.symbol);
+          const held = brokerQty.get(code) ?? 0;
+          const qty = Math.min(Math.floor(Number(p.shares)), held);
+          if (qty < 1) { remaining.push(pos); continue; }
+          try {
+            const r = await withKisRetry(() => adapter.placeSellOrder(p.symbol, qty, 0));
+            const px = brokerPositions.find((b) => b.symbol === code)?.curPrice ?? Number(p.entry_price);
+            await sb.from('bnf_live_trades').insert({
+              user_id: uid, broker: raw.broker, mode: raw.mode, symbol: p.symbol, name: p.name,
+              strategy_code: p.strategy_code, side: 'SELL_SL', trigger_note: '대세하락장 자동 전량청산',
+              order_type: 'market', order_price: px, qty, pnl: qty * (px - Number(p.entry_price)),
+              order_no: r.orderNo ?? '', status: r.ok ? 'SUBMITTED' : 'FAILED',
+            });
+            if (r.ok) {
+              await sb.from('bnf_live_positions').update({ status: 'CLOSED', closed_at: new Date().toISOString() }).eq('id', p.id);
+              brokerQty.set(code, held - qty);
+              liquidated.push(`${p.name} ${qty}주`);
+            } else { remaining.push(pos); }
+          } catch { remaining.push(pos); }
+        }
+        openPos = remaining;
+        await sb.from('bnf_trading_settings').update({ rg_last_liquidated_date: regimeTradeDate }).eq('user_id', uid);
+        await log('warn', '대세하락장 자동청산', liquidated.length ? liquidated.join(', ') : '청산 대상 없음');
+        if (liquidated.length) await notify(`🧊 <b>[자동매매·${modeTag}] 대세하락장 자동 전량청산</b>\n시장국면이 대세하락장으로 확정되어 보유 포지션을 전량 매도했습니다.\n${liquidated.join('\n')}`);
+      }
 
       for (const pos of openPos ?? []) {
         const p = pos as { id: number; symbol: string; name: string; strategy_code: string; entry_price: number; shares: number; sl: number; tp1_hit: boolean; opened_at: string };
@@ -259,8 +309,12 @@ export default async () => {
       // ── 리스크 가드 평가 (신규 매수만 차단, 매도는 위에서 이미 항상 수행됨) ──
       let rgBlockAll: string | null = null; // 사유 문자열이 있으면 이번 회차 전 전략 매수 차단
 
+      // ⓪ 시스템 최후 방어선 (사용자 설정 무관·카드 필터 무관): 비상 리스크오프 / 데이터 이상
+      if (riskState === 'EMERGENCY_RISK_OFF') rgBlockAll = '비상 리스크오프 (KOSPI 급락) — 신규 매수 전면 중단';
+      else if (riskState === 'DATA_INVALID') rgBlockAll = '시장 데이터 이상 — 신규 매수 전면 중단';
+
       // ② 서킷브레이커: KOSPI 당일 급락 시 일정 시간 신규 매수 차단
-      if (raw.rg_circuit_enabled) {
+      if (!rgBlockAll && raw.rg_circuit_enabled) {
         const untilMs = raw.rg_circuit_until ? new Date(raw.rg_circuit_until).getTime() : 0;
         if (kospiChangePct != null && kospiChangePct <= -raw.rg_circuit_drop_pct && untilMs < now) {
           const newUntil = new Date(now + raw.rg_circuit_block_hours * 3600_000).toISOString();
@@ -340,10 +394,17 @@ export default async () => {
         try {
           const mod = getStrategy(strat.strategy_code);
 
-          // 시장국면 게이트: 전략의 적정 장세와 현재 KOSPI 국면이 다르면 신규 매수 스킵 (매도는 항상 수행되므로 영향 없음)
-          if (currentRegime && mod.regime !== 'ANY' && mod.regime !== currentRegime) {
-            await stratLog('info', '매수 스킵', `${mod.name}: 시장 국면 불일치 (전략 적정장세=${mod.regime}, 현재=${currentRegime})`);
-            continue;
+          // 장세 자동필터: 카드의 regime_filter_enabled가 켜져 있을 때만 5국면 게이트 적용 (매도는 항상 수행되므로 영향 없음)
+          if (strat.regime_filter_enabled && currentRegime) {
+            if (currentRegime === 'BEAR_MAJOR' || currentRegime === 'TRANSITION') {
+              await stratLog('info', '매수 스킵', `${mod.name}: ${currentRegime === 'BEAR_MAJOR' ? '대세하락장' : '전환구간'} — 신규 매수 대기`);
+              continue;
+            }
+            const coarse = coarseRegime(currentRegime); // BULL_MAJOR/BULL→BULL, RANGE→SIDEWAYS, BEAR→BEAR
+            if (mod.regime !== 'ANY' && mod.regime !== coarse) {
+              await stratLog('info', '매수 스킵', `${mod.name}: 장세 불일치 (전략 적정장세=${mod.regime}, 현재 국면=${currentRegime})`);
+              continue;
+            }
           }
 
           await mod.init?.(fetchCandlesServer);

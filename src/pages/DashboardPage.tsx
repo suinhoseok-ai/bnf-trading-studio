@@ -9,12 +9,18 @@ import { supabase } from '../lib/supabase';
 import { useStrategySelection } from '../hooks/useStrategySelection';
 import StrategyPicker from '../components/StrategyPicker';
 import Stars from '../components/Stars';
-import { judgeBothMarkets, regimeIcon, regimeLabel, type RegimeResult, type Regime, type CandleFetcher } from '../lib/marketRegime';
+import { judgeBothMarkets, regimeIcon, regimeLabel, type RegimeResult, type RegimeEvidence, type Regime, type RiskState, type CandleFetcher } from '../lib/marketRegime';
 import { recommendForRegime } from '../lib/strategyRecommend';
 
 interface IndexQuote { label: string; price: number; changePct: number }
-interface RegimeState { kospi: RegimeResult; kosdaq: RegimeResult; source: 'db' | 'client'; judgedAt?: string; session?: string }
+/** 대시보드 표시용으로 정규화한 국면(확정=DB 컬럼 또는 클라이언트 후보, 근거=detail) */
+interface RegimeView { confirmed: Regime; candidate: Regime; confidence: number; streak: number; riskState: RiskState; evidence: RegimeEvidence[] }
+interface RegimeState { kospi: RegimeView; kosdaq: RegimeView; source: 'db' | 'client'; judgedAt?: string; session?: string }
 interface RegimeHistoryRow { trade_date: string; kospi_regime: Regime; kosdaq_regime: Regime }
+
+const viewFromResult = (r: RegimeResult): RegimeView => ({
+  confirmed: r.candidate, candidate: r.candidate, confidence: r.confidence, streak: 0, riskState: r.riskState, evidence: r.evidence,
+});
 
 const regimeFetcher: CandleFetcher = async (symbol, interval, range) => {
   const { candles } = await fetchCandles(symbol, interval as '15m' | '60m' | '1d', range);
@@ -60,8 +66,18 @@ export default function DashboardPage() {
       const { data } = await supabase.from('bnf_market_regime').select('*')
         .order('judged_at', { ascending: false }).limit(1).maybeSingle();
       if (data) {
-        const detail = data.detail as { kospi: RegimeResult; kosdaq: RegimeResult };
-        setRegime({ kospi: detail.kospi, kosdaq: detail.kosdaq, source: 'db', judgedAt: data.judged_at as string, session: data.session as string });
+        const detail = (data.detail ?? {}) as { kospi?: RegimeResult; kosdaq?: RegimeResult; kospiStreak?: number; kosdaqStreak?: number };
+        const kospi: RegimeView = {
+          confirmed: data.kospi_regime as Regime, candidate: (data.kospi_candidate as Regime) ?? (data.kospi_regime as Regime),
+          confidence: Number(data.confidence ?? detail.kospi?.confidence ?? 0), streak: Number(data.confirmation_streak ?? 0),
+          riskState: (data.risk_state as RiskState) ?? 'NORMAL', evidence: detail.kospi?.evidence ?? [],
+        };
+        const kosdaq: RegimeView = {
+          confirmed: data.kosdaq_regime as Regime, candidate: (data.kosdaq_candidate as Regime) ?? (data.kosdaq_regime as Regime),
+          confidence: Number(detail.kosdaq?.confidence ?? 0), streak: Number(detail.kosdaqStreak ?? 0),
+          riskState: detail.kosdaq?.riskState ?? 'NORMAL', evidence: detail.kosdaq?.evidence ?? [],
+        };
+        setRegime({ kospi, kosdaq, source: 'db', judgedAt: data.judged_at as string, session: data.session as string });
         const { data: hist } = await supabase.from('bnf_market_regime')
           .select('trade_date, kospi_regime, kosdaq_regime').eq('session', 'close')
           .order('trade_date', { ascending: false }).limit(7);
@@ -69,10 +85,10 @@ export default function DashboardPage() {
         return;
       }
     }
-    // 폴백: DB 판정 이력이 없거나 게스트 모드 → 클라이언트에서 직접 계산 (히스테리시스/7일 추이 없음)
+    // 폴백: DB 판정 이력이 없거나 게스트 모드 → 클라이언트에서 직접 계산 (확정=후보, 신뢰도 계산, 7일 추이 없음)
     try {
       const { kospi, kosdaq } = await judgeBothMarkets(regimeFetcher);
-      setRegime({ kospi, kosdaq, source: 'client' });
+      setRegime({ kospi: viewFromResult(kospi), kosdaq: viewFromResult(kosdaq), source: 'client' });
       setRegimeHistory([]);
     } catch { setRegime(null); }
   }, [guestMode]);
@@ -296,18 +312,26 @@ export default function DashboardPage() {
             {account ? `보유 포지션 ${account.posCount}건` : <Link to="/paper" className="text-accent">모의투자 시작 →</Link>}
           </div>
         </div>
-        <div className="card cursor-pointer hover:border-accent/50" onClick={() => setRegimeExpanded((v) => !v)}>
+        <div
+          className={`card cursor-pointer hover:border-accent/50 ${regime && regime.kospi.riskState !== 'NORMAL' ? '!border-red-500/60' : ''}`}
+          onClick={() => setRegimeExpanded((v) => !v)}
+        >
           <div className="text-xs text-slate-400 flex items-center justify-between">
             <span>시장현황</span>
             {regime && <span className="text-slate-500">{regimeExpanded ? '접기 ▲' : '근거 보기 ▼'}</span>}
           </div>
           {regime ? (
             <>
-              <div className="text-xl font-bold text-ink mt-1">{regimeIcon(regime.kospi.regime)} {regimeLabel(regime.kospi.regime)}</div>
+              <div className="text-xl font-bold text-ink mt-1">{regimeIcon(regime.kospi.confirmed)} {regimeLabel(regime.kospi.confirmed)}</div>
               <div className="text-sm text-slate-400 mt-0.5">
-                KOSPI {regimeIcon(regime.kospi.regime)} · KOSDAQ {regimeIcon(regime.kosdaq.regime)}
+                KOSPI {regimeIcon(regime.kospi.confirmed)} · KOSDAQ {regimeIcon(regime.kosdaq.confirmed)}
                 {regime.source === 'client' && <span className="ml-1 text-slate-500">(간이계산)</span>}
               </div>
+              {regime.kospi.riskState !== 'NORMAL' && (
+                <div className="text-xs text-red-400 mt-0.5">
+                  {regime.kospi.riskState === 'EMERGENCY_RISK_OFF' ? '🚨 비상 리스크오프' : '⚠️ 데이터 이상'}
+                </div>
+              )}
             </>
           ) : (
             <div className="text-sm text-slate-500 mt-2">판정 전</div>
@@ -330,14 +354,13 @@ export default function DashboardPage() {
 
           {(['kospi', 'kosdaq'] as const).map((key) => {
             const r = regime[key];
-            const rec = recommendForRegime(r.regime, strategyOrder);
+            const rec = recommendForRegime(r.confirmed, strategyOrder);
             return (
               <div key={key} className="bg-base rounded-lg p-3 border border-edge">
-                <div className="font-semibold text-ink mb-2">
-                  {key.toUpperCase()} — {regimeIcon(r.regime)} {regimeLabel(r.regime)}
-                  <span className="text-xs text-slate-500 font-normal ml-2">
-                    (상승 {r.score.bull}/6 · 횡보 {r.score.sideways}/5 · 하락 {r.score.bear}/6)
-                  </span>
+                <div className="font-semibold text-ink mb-2 flex items-center gap-2 flex-wrap">
+                  <span>{key.toUpperCase()} — {regimeIcon(r.confirmed)} {regimeLabel(r.confirmed)}</span>
+                  <span className="text-xs text-slate-500 font-normal">신뢰도 {(r.confidence * 100).toFixed(0)}%</span>
+                  {r.streak > 0 && <span className="text-xs text-amber-400 font-normal">전환 대기 {r.streak}일 (후보: {regimeLabel(r.candidate)})</span>}
                 </div>
                 <div className="grid sm:grid-cols-2 gap-x-4 gap-y-1 text-sm mb-2">
                   {r.evidence.map((e) => (
@@ -347,9 +370,13 @@ export default function DashboardPage() {
                   ))}
                 </div>
                 <div className="text-xs text-accent">
-                  추천 전략: {rec.primary ? rec.primary.name.split('·')[0].trim() : '없음(위험도 기준 미충족)'}
-                  {rec.secondary && ` · 차선: ${rec.secondary.name.split('·')[0].trim()}`}
-                  {r.regime === 'BEAR' && ' · 현금 비중 확대 권고'}
+                  {rec.cashMode
+                    ? (r.confirmed === 'BEAR_MAJOR' ? '관망·현금화 (신규 롱 금지)' : '전환구간 — 기존 포지션 관리, 신규 진입 대기')
+                    : <>
+                        1순위: {rec.primary ? rec.primary.name.split('·')[0].trim() : '없음(위험도 기준 미충족)'}
+                        {rec.secondary && ` · 2순위: ${rec.secondary.name.split('·')[0].trim()}`}
+                        {r.confirmed === 'BEAR' && ' · 현금 비중 확대 권고'}
+                      </>}
                 </div>
               </div>
             );

@@ -305,7 +305,8 @@ alter table public.bnf_trading_settings
   add column if not exists rg_streak_block_hours numeric not null default 24,
   add column if not exists rg_symbol_cooldown_enabled boolean not null default true,
   add column if not exists rg_symbol_cooldown_hours numeric not null default 24,
-  add column if not exists rg_bear_major_liquidate boolean not null default false; -- Phase A(국면엔진 v2) 연동 전까지는 저장만 되고 미작동
+  add column if not exists rg_bear_major_liquidate boolean not null default false,
+  add column if not exists rg_last_liquidated_date date;  -- 대세하락장 자동청산 중복 방지(하루 1회)
 
 -- 전략 카드별 "장세 자동필터" — 끄면 시장국면과 무관하게 항상 매수 스캔 (Phase A/B 연동 전까지는 저장만 되고 미작동)
 alter table public.bnf_trading_strategies
@@ -366,13 +367,19 @@ create table if not exists public.bnf_trade_logs (
 );
 
 -- 시장국면 판정 이력 (KOSPI/KOSDAQ, 세션당 1건: preopen 08:30 / midday 11:00 / close 15:30)
+-- 국면 v2: BULL_MAJOR/BULL/RANGE/BEAR/BEAR_MAJOR/TRANSITION. kospi_regime=확정, kospi_candidate=후보.
 create table if not exists public.bnf_market_regime (
   id bigserial primary key,
   judged_at timestamptz not null default now(),
   session text not null check (session in ('preopen', 'midday', 'close')),
   trade_date date not null,
-  kospi_regime text not null check (kospi_regime in ('BULL', 'SIDEWAYS', 'BEAR')),
-  kosdaq_regime text not null check (kosdaq_regime in ('BULL', 'SIDEWAYS', 'BEAR')),
+  kospi_regime text not null check (kospi_regime in ('BULL_MAJOR','BULL','RANGE','BEAR','BEAR_MAJOR','TRANSITION')),
+  kosdaq_regime text not null check (kosdaq_regime in ('BULL_MAJOR','BULL','RANGE','BEAR','BEAR_MAJOR','TRANSITION')),
+  kospi_candidate text,
+  kosdaq_candidate text,
+  confidence numeric,                                   -- KOSPI 확정 신뢰도 (0~1)
+  confirmation_streak int not null default 0,           -- KOSPI 전환 대기 연속일수
+  risk_state text not null default 'NORMAL',            -- NORMAL / EMERGENCY_RISK_OFF / DATA_INVALID
   detail jsonb not null default '{}'::jsonb,
   unique (trade_date, session)
 );
