@@ -2,14 +2,15 @@
 // POST /api/broker  { action, accessToken, ... }
 // actions:
 //   save-settings  설정 저장 (API 키는 AES-GCM 암호화)
-//   get-settings   설정 조회 (키는 마스킹)
+//   save-riskguard 리스크가드 설정 저장 { riskGuard: {...} }
+//   get-settings   설정 조회 (키는 마스킹, riskGuard 포함)
 //   test           브로커 연결 테스트 (토큰 발급 + 계좌 조회)
 //   account        계좌 요약
 //   positions      거래소 보유 포지션
 //   orders         최근 주문 내역
 //   quotes         실시간 시세 스냅샷 { symbols[] } (최대 6개/요청, 서버가 초당제한 맞춰 지연)
 //   force-sell     강제매도 { symbol, qty(0=전량), price(0=시장가) }
-//   save-strategy  전략 카드 저장 { id?, strategyCode, universe, intervalMin, maxPositions, budget }
+//   save-strategy  전략 카드 저장 { id?, strategyCode, universe, intervalMin, maxPositions, budget, regimeFilterEnabled }
 //   toggle-strategy 전략 카드 시작/중지 { id, running }
 //   delete-strategy 전략 카드 삭제 { id }
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
@@ -29,6 +30,11 @@ interface SettingsRow {
   enabled: boolean; status: string; strategy_code: string; universe: string;
   interval_min: number; max_positions: number; budget_pct: number;
   token: TokenCache; last_run_at: string | null; last_error: string;
+  rg_daily_loss_enabled: boolean; rg_daily_loss_pct: number;
+  rg_circuit_enabled: boolean; rg_circuit_drop_pct: number; rg_circuit_block_hours: number; rg_circuit_until: string | null;
+  rg_streak_enabled: boolean; rg_streak_losses: number; rg_streak_block_hours: number;
+  rg_symbol_cooldown_enabled: boolean; rg_symbol_cooldown_hours: number;
+  rg_bear_major_liquidate: boolean;
 }
 
 async function makeAdapter(sb: SupabaseClient, row: SettingsRow) {
@@ -120,11 +126,37 @@ export default async (req: Request) => {
         return json({ ok: true, encryption: encryptionEnabled() });
       }
 
+      case 'save-riskguard': {
+        const g = (body.riskGuard ?? {}) as Record<string, unknown>;
+        const row: Record<string, unknown> = {
+          user_id: uid,
+          rg_daily_loss_enabled: !!g.dailyLossEnabled,
+          rg_daily_loss_pct: Math.min(50, Math.max(0.1, Number(g.dailyLossPct) || 3)),
+          rg_circuit_enabled: !!g.circuitEnabled,
+          rg_circuit_drop_pct: Math.min(30, Math.max(0.5, Number(g.circuitDropPct) || 5)),
+          rg_circuit_block_hours: Math.min(72, Math.max(1, Number(g.circuitBlockHours) || 12)),
+          rg_streak_enabled: !!g.streakEnabled,
+          rg_streak_losses: Math.min(10, Math.max(2, Math.floor(Number(g.streakLosses)) || 3)),
+          rg_streak_block_hours: Math.min(168, Math.max(1, Number(g.streakBlockHours) || 24)),
+          rg_symbol_cooldown_enabled: !!g.symbolCooldownEnabled,
+          rg_symbol_cooldown_hours: Math.min(168, Math.max(1, Number(g.symbolCooldownHours) || 24)),
+          rg_bear_major_liquidate: !!g.bearMajorLiquidate,
+          updated_at: new Date().toISOString(),
+        };
+        // 계좌 연결 설정이 아직 없으면(브로커 미저장) upsert가 not-null 컬럼에서 실패하므로 먼저 확인
+        const existing = await loadSettings();
+        if (!existing) return json({ ok: false, error: '거래소 연결 설정을 먼저 저장하세요.' }, 400);
+        const { error } = await sb.from('bnf_trading_settings').update(row).eq('user_id', uid);
+        if (error) return json({ ok: false, error: error.message }, 500);
+        await log(sb, uid, 'info', '리스크가드 설정 저장', JSON.stringify(row));
+        return json({ ok: true });
+      }
+
       case 'get-settings': {
         const row = await loadSettings();
         if (!row) return json({ ok: true, settings: null, encryption: encryptionEnabled() });
         const { data: strategies } = await sb.from('bnf_trading_strategies')
-          .select('id, strategy_code, universe, interval_min, max_positions, budget, status, last_run_at, last_error')
+          .select('id, strategy_code, universe, interval_min, max_positions, budget, status, last_run_at, last_error, regime_filter_enabled')
           .eq('user_id', uid).order('id', { ascending: true });
         return json({
           ok: true,
@@ -137,7 +169,16 @@ export default async (req: Request) => {
               id: s.id, strategyCode: s.strategy_code, universe: s.universe,
               intervalMin: s.interval_min, maxPositions: s.max_positions, budget: Number(s.budget),
               status: s.status, lastRunAt: s.last_run_at, lastError: s.last_error,
+              regimeFilterEnabled: s.regime_filter_enabled,
             })),
+            riskGuard: {
+              dailyLossEnabled: row.rg_daily_loss_enabled, dailyLossPct: Number(row.rg_daily_loss_pct),
+              circuitEnabled: row.rg_circuit_enabled, circuitDropPct: Number(row.rg_circuit_drop_pct),
+              circuitBlockHours: Number(row.rg_circuit_block_hours), circuitUntil: row.rg_circuit_until,
+              streakEnabled: row.rg_streak_enabled, streakLosses: row.rg_streak_losses, streakBlockHours: Number(row.rg_streak_block_hours),
+              symbolCooldownEnabled: row.rg_symbol_cooldown_enabled, symbolCooldownHours: Number(row.rg_symbol_cooldown_hours),
+              bearMajorLiquidate: row.rg_bear_major_liquidate,
+            },
           },
         });
       }
@@ -235,6 +276,7 @@ export default async (req: Request) => {
           interval_min: Math.max(10, Number(s.intervalMin) || 10),
           max_positions: Math.min(20, Math.max(1, Number(s.maxPositions) || 5)),
           budget: Math.max(0, Number(s.budget) || 0),
+          regime_filter_enabled: s.regimeFilterEnabled !== false,
           updated_at: new Date().toISOString(),
         };
         const id = s.id != null ? Number(s.id) : null;

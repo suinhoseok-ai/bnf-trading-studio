@@ -15,7 +15,23 @@ interface StrategyCard {
   status: string;          // RUNNING | STOPPED | ERROR (미저장 카드는 항상 STOPPED)
   lastRunAt: string | null;
   lastError: string;
+  regimeFilterEnabled: boolean;
 }
+
+interface RiskGuard {
+  dailyLossEnabled: boolean; dailyLossPct: number;
+  circuitEnabled: boolean; circuitDropPct: number; circuitBlockHours: number; circuitUntil: string | null;
+  streakEnabled: boolean; streakLosses: number; streakBlockHours: number;
+  symbolCooldownEnabled: boolean; symbolCooldownHours: number;
+  bearMajorLiquidate: boolean;
+}
+const DEFAULT_RISKGUARD: RiskGuard = {
+  dailyLossEnabled: false, dailyLossPct: 3,
+  circuitEnabled: true, circuitDropPct: 5, circuitBlockHours: 12, circuitUntil: null,
+  streakEnabled: false, streakLosses: 3, streakBlockHours: 24,
+  symbolCooldownEnabled: true, symbolCooldownHours: 24,
+  bearMajorLiquidate: false,
+};
 
 interface TradeSettings {
   broker: 'kis' | 'toss';
@@ -34,7 +50,7 @@ const DEFAULT_SETTINGS: TradeSettings = {
 
 const newCard = (strategyCode: string): StrategyCard => ({
   id: null, strategyCode, universe: 'KOSPI', intervalMin: 10, maxPositions: 5, budget: 0,
-  status: 'STOPPED', lastRunAt: null, lastError: '',
+  status: 'STOPPED', lastRunAt: null, lastError: '', regimeFilterEnabled: true,
 });
 
 export default function TradingPage() {
@@ -50,11 +66,13 @@ export default function TradingPage() {
   const [positions, setPositions] = useState<BrokerPos[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [riskGuard, setRiskGuard] = useState<RiskGuard>(DEFAULT_RISKGUARD);
 
   const flash = (ok: boolean, text: string) => { setMsg({ ok, text }); setTimeout(() => setMsg(null), 4000); };
   const setF = <K extends keyof TradeSettings>(k: K, v: TradeSettings[K]) => setSettings((p) => ({ ...p, [k]: v }));
   const setCard = (idx: number, patch: Partial<StrategyCard>) =>
     setStrategies((prev) => prev.map((s, i) => (i === idx ? { ...s, ...patch } : s)));
+  const setRg = <K extends keyof RiskGuard>(k: K, v: RiskGuard[K]) => setRiskGuard((p) => ({ ...p, [k]: v }));
 
   const api = useCallback(async (action: string, extra: Record<string, unknown> = {}) => {
     const { data } = await supabase.auth.getSession();
@@ -80,12 +98,14 @@ export default function TradingPage() {
         setKeyMasked(s.appKeyMasked ?? '');
         setStrategies((s.strategies ?? []).map((st: {
           id: number; strategyCode: string; universe: string; intervalMin: number; maxPositions: number;
-          budget: number; status: string; lastRunAt: string | null; lastError: string;
+          budget: number; status: string; lastRunAt: string | null; lastError: string; regimeFilterEnabled: boolean;
         }) => ({
           id: st.id, strategyCode: st.strategyCode, universe: st.universe,
           intervalMin: st.intervalMin, maxPositions: st.maxPositions, budget: st.budget,
           status: st.status, lastRunAt: st.lastRunAt, lastError: st.lastError,
+          regimeFilterEnabled: st.regimeFilterEnabled !== false,
         })));
+        if (s.riskGuard) setRiskGuard({ ...DEFAULT_RISKGUARD, ...s.riskGuard });
       }
     } catch { /* 함수 미배포(로컬) 등 — 화면은 유지 */ }
   }, [api]);
@@ -138,10 +158,19 @@ export default function TradingPage() {
   const saveCard = (idx: number) => run(`save-${idx}`, async () => {
     const c = strategies[idx];
     const j = await api('save-strategy', {
-      strategy: { id: c.id ?? undefined, strategyCode: c.strategyCode, universe: c.universe, intervalMin: c.intervalMin, maxPositions: c.maxPositions, budget: c.budget },
+      strategy: {
+        id: c.id ?? undefined, strategyCode: c.strategyCode, universe: c.universe, intervalMin: c.intervalMin,
+        maxPositions: c.maxPositions, budget: c.budget, regimeFilterEnabled: c.regimeFilterEnabled,
+      },
     });
     setCard(idx, { id: j.id });
     flash(true, '전략을 저장했습니다.');
+  });
+
+  const saveRiskGuard = () => run('riskguard', async () => {
+    await api('save-riskguard', { riskGuard });
+    flash(true, '리스크 가드 설정을 저장했습니다.');
+    await loadSettings();
   });
 
   const toggleCard = (idx: number) => run(`toggle-${idx}`, async () => {
@@ -241,6 +270,88 @@ export default function TradingPage() {
         </div>
       </div>
 
+      {/* ── 리스크 가드 (자동매매 안전장치) ── */}
+      <div className="card space-y-3">
+        <div className="flex items-center justify-between">
+          <h2 className="font-bold text-ink">🛡 리스크 가드 (자동매매 안전장치)</h2>
+          <button className="btn-primary !py-1 !px-3 text-sm" onClick={saveRiskGuard} disabled={busy !== null}>
+            {busy === 'riskguard' ? '저장 중...' : '저장'}
+          </button>
+        </div>
+        <p className="text-xs text-slate-500 leading-relaxed">
+          각 항목을 개별로 켜고 끌 수 있습니다. <b className="text-slate-300">매도(청산)는 이 설정과 무관하게 항상 정상 동작</b>하며, 아래 조건은 "신규 매수만" 막습니다.
+        </p>
+        <div className="grid md:grid-cols-2 gap-3">
+          <div className="rounded-xl border border-edge p-3 space-y-2">
+            <label className="flex items-center gap-2 font-medium text-ink text-sm">
+              <input type="checkbox" checked={riskGuard.dailyLossEnabled} onChange={(e) => setRg('dailyLossEnabled', e.target.checked)} />
+              ① 일일 손실 한도
+            </label>
+            <p className="text-xs text-slate-500">당일 실현손실이 전체 예산의 일정 비율을 넘으면 오늘 신규 매수를 중지합니다.</p>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-slate-400">한도</span>
+              <input className="input w-24" type="number" min={0.1} max={50} step={0.5} value={riskGuard.dailyLossPct} onChange={(e) => setRg('dailyLossPct', Number(e.target.value))} />
+              <span className="text-slate-400">% (전략 예산 합계 기준)</span>
+            </div>
+          </div>
+          <div className="rounded-xl border border-edge p-3 space-y-2">
+            <label className="flex items-center gap-2 font-medium text-ink text-sm">
+              <input type="checkbox" checked={riskGuard.circuitEnabled} onChange={(e) => setRg('circuitEnabled', e.target.checked)} />
+              ② 서킷브레이커 (급락 감지)
+            </label>
+            <p className="text-xs text-slate-500">KOSPI가 당일 기준 급락하면 일정 시간 전체(모든 전략) 신규 매수를 차단합니다.</p>
+            <div className="flex items-center gap-2 text-sm flex-wrap">
+              <span className="text-slate-400">급락폭</span>
+              <input className="input w-20" type="number" min={0.5} max={30} step={0.5} value={riskGuard.circuitDropPct} onChange={(e) => setRg('circuitDropPct', Number(e.target.value))} />
+              <span className="text-slate-400">% 이상 · 차단</span>
+              <input className="input w-20" type="number" min={1} max={72} step={1} value={riskGuard.circuitBlockHours} onChange={(e) => setRg('circuitBlockHours', Number(e.target.value))} />
+              <span className="text-slate-400">시간</span>
+            </div>
+            {riskGuard.circuitUntil && new Date(riskGuard.circuitUntil).getTime() > Date.now() && (
+              <p className="text-xs text-red-400">⛔ 발동 중 — {new Date(riskGuard.circuitUntil).toLocaleString('ko-KR')}까지 차단</p>
+            )}
+          </div>
+          <div className="rounded-xl border border-edge p-3 space-y-2">
+            <label className="flex items-center gap-2 font-medium text-ink text-sm">
+              <input type="checkbox" checked={riskGuard.streakEnabled} onChange={(e) => setRg('streakEnabled', e.target.checked)} />
+              ③ 연속 손절 쿨다운
+            </label>
+            <p className="text-xs text-slate-500">같은 전략에서 연속 손절이 나면 그 전략의 매수를 일정 시간 쉽니다.</p>
+            <div className="flex items-center gap-2 text-sm flex-wrap">
+              <span className="text-slate-400">연속</span>
+              <input className="input w-16" type="number" min={2} max={10} step={1} value={riskGuard.streakLosses} onChange={(e) => setRg('streakLosses', Number(e.target.value))} />
+              <span className="text-slate-400">회 손절 시 · 정지</span>
+              <input className="input w-20" type="number" min={1} max={168} step={1} value={riskGuard.streakBlockHours} onChange={(e) => setRg('streakBlockHours', Number(e.target.value))} />
+              <span className="text-slate-400">시간</span>
+            </div>
+          </div>
+          <div className="rounded-xl border border-edge p-3 space-y-2">
+            <label className="flex items-center gap-2 font-medium text-ink text-sm">
+              <input type="checkbox" checked={riskGuard.symbolCooldownEnabled} onChange={(e) => setRg('symbolCooldownEnabled', e.target.checked)} />
+              ④ 동일 종목 재진입 쿨다운
+            </label>
+            <p className="text-xs text-slate-500">손절된 종목은 일정 시간 동안 어느 전략도 다시 매수하지 않습니다.</p>
+            <div className="flex items-center gap-2 text-sm">
+              <span className="text-slate-400">쿨다운</span>
+              <input className="input w-20" type="number" min={1} max={168} step={1} value={riskGuard.symbolCooldownHours} onChange={(e) => setRg('symbolCooldownHours', Number(e.target.value))} />
+              <span className="text-slate-400">시간</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-red-500/40 bg-red-500/5 p-3 space-y-1.5">
+          <label className="flex items-center gap-2 font-medium text-red-300 text-sm">
+            <input type="checkbox" checked={riskGuard.bearMajorLiquidate} onChange={(e) => setRg('bearMajorLiquidate', e.target.checked)} />
+            ⚠️ 대세하락장(BEAR_MAJOR) 자동 전량청산 — 기본 OFF
+          </label>
+          <p className="text-xs text-slate-400 leading-relaxed">
+            위 4가지는 "신규 매수만" 막지만, 이 옵션을 켜면 시장국면이 대세하락장으로 확정되는 즉시 자동매매가 보유 중인 모든 포지션을 시장가로 즉시 매도합니다. 수동으로 보유한 종목은 건드리지 않습니다.
+            각 전략의 "장세 자동필터"가 꺼져있으면 그 전략의 포지션은 이 자동청산 대상에서 제외됩니다.
+          </p>
+          <p className="text-xs text-amber-400">※ 시장국면 엔진(대세상승/상승/횡보/하락/대세하락)이 아직 3단계(상승/횡보/하락)로만 동작 중이라, 이 옵션은 5단계 국면 업그레이드가 배포된 뒤부터 실제로 작동합니다. 지금은 저장만 됩니다.</p>
+        </div>
+      </div>
+
       {/* ── 자동매매 전략 (카드형, 여러 개 동시 운용) ── */}
       <div className="card space-y-3">
         <div className="flex items-center justify-between flex-wrap gap-2">
@@ -310,7 +421,13 @@ export default function TradingPage() {
                 </div>
                 <div>
                   <label className="text-xs text-slate-400 block mb-1">예산 (고정 금액, 원)</label>
-                  <input className="input w-full" type="number" min={0} step={10000} value={c.budget} onChange={(e) => setCard(idx, { budget: Math.max(0, Number(e.target.value)) })} />
+                  <div className="flex items-center gap-3">
+                    <input className="input flex-1" type="number" min={0} step={10000} value={c.budget} onChange={(e) => setCard(idx, { budget: Math.max(0, Number(e.target.value)) })} />
+                    <label className="flex items-center gap-1.5 text-xs text-slate-400 whitespace-nowrap shrink-0" title="장세 자동필터를 켜면(기본값) 시장국면이 전환/불확실 또는 대세하락장일 때 이 전략의 신규 매수만 자동으로 쉽니다. 꺼두면 국면과 무관하게 항상 기존처럼 동작합니다.">
+                      <input type="checkbox" checked={c.regimeFilterEnabled} onChange={(e) => setCard(idx, { regimeFilterEnabled: e.target.checked })} />
+                      🧭 장세 자동필터
+                    </label>
+                  </div>
                 </div>
               </div>
             </div>

@@ -87,6 +87,11 @@ interface SettingsRow {
   user_id: string; broker: string; mode: 'paper' | 'real';
   app_key: string; app_secret: string; account_no: string; account_product_cd: string;
   token: TokenCache;
+  rg_daily_loss_enabled: boolean; rg_daily_loss_pct: number;
+  rg_circuit_enabled: boolean; rg_circuit_drop_pct: number; rg_circuit_block_hours: number; rg_circuit_until: string | null;
+  rg_streak_enabled: boolean; rg_streak_losses: number; rg_streak_block_hours: number;
+  rg_symbol_cooldown_enabled: boolean; rg_symbol_cooldown_hours: number;
+  rg_bear_major_liquidate: boolean;
 }
 
 interface StrategyRow {
@@ -135,6 +140,17 @@ export default async () => {
       ?? (await judgeMarket(fetchCandlesServer, '^KS11', 'KOSPI')).regime;
   } catch { /* 게이트 없이 진행 (판정 실패는 매수를 막지 않음) */
   };
+
+  // 서킷브레이커용 KOSPI 당일 등락률 (1회만 조회, 실패 시 null → 서킷브레이커 미작동)
+  let kospiChangePct: number | null = null;
+  try {
+    const idx = await fetchCandlesServer('^KS11', '1d', '5d');
+    if (idx.length >= 2) {
+      const prevClose = idx[idx.length - 2].close;
+      const last = idx[idx.length - 1].close;
+      if (prevClose > 0) kospiChangePct = ((last - prevClose) / prevClose) * 100;
+    }
+  } catch { /* 조회 실패 시 서킷브레이커 게이트 없이 진행 */ }
 
   for (const uid of uids) {
     const log = (level: string, event: string, detail: string) =>
@@ -240,14 +256,82 @@ export default async () => {
         }
       }
 
+      // ── 리스크 가드 평가 (신규 매수만 차단, 매도는 위에서 이미 항상 수행됨) ──
+      let rgBlockAll: string | null = null; // 사유 문자열이 있으면 이번 회차 전 전략 매수 차단
+
+      // ② 서킷브레이커: KOSPI 당일 급락 시 일정 시간 신규 매수 차단
+      if (raw.rg_circuit_enabled) {
+        const untilMs = raw.rg_circuit_until ? new Date(raw.rg_circuit_until).getTime() : 0;
+        if (kospiChangePct != null && kospiChangePct <= -raw.rg_circuit_drop_pct && untilMs < now) {
+          const newUntil = new Date(now + raw.rg_circuit_block_hours * 3600_000).toISOString();
+          await sb.from('bnf_trading_settings').update({ rg_circuit_until: newUntil }).eq('user_id', uid);
+          raw.rg_circuit_until = newUntil;
+          await log('warn', '서킷브레이커 발동', `KOSPI 당일 ${kospiChangePct.toFixed(2)}% 급락 → ${raw.rg_circuit_block_hours}시간 신규 매수 차단`);
+          await notify(`🚨 <b>[자동매매·${modeTag}] 서킷브레이커 발동</b>\nKOSPI 당일 ${kospiChangePct.toFixed(2)}% 급락\n${raw.rg_circuit_block_hours}시간 동안 모든 전략 신규 매수를 차단합니다.`);
+        }
+        if (raw.rg_circuit_until && new Date(raw.rg_circuit_until).getTime() > now) {
+          rgBlockAll = `서킷브레이커 발동 중 (${new Date(raw.rg_circuit_until).toLocaleString('ko-KR')}까지 차단)`;
+        }
+      }
+
+      // ① 일일 손실 한도: 당일(KST) 실현손익 합이 전략 예산 합계의 -N% 이하면 당일 신규 매수 중지
+      if (!rgBlockAll && raw.rg_daily_loss_enabled && strategies.length > 0) {
+        const kNow = kstNow();
+        const kstMidnightIso = new Date(Date.UTC(kNow.year, kNow.month - 1, kNow.day) - 9 * 3600_000).toISOString();
+        const { data: todaySells } = await sb.from('bnf_live_trades')
+          .select('pnl').eq('user_id', uid).neq('side', 'BUY').gte('executed_at', kstMidnightIso);
+        const todayPnl = (todaySells ?? []).reduce((sum, t) => sum + Number((t as { pnl: number }).pnl), 0);
+        const totalBudget = strategies.reduce((sum, s) => sum + Number(s.budget), 0);
+        if (totalBudget > 0 && todayPnl <= -(totalBudget * raw.rg_daily_loss_pct / 100)) {
+          rgBlockAll = `일일 손실 한도 도달 (당일 손익 ${Math.round(todayPnl).toLocaleString('ko-KR')}원 ≤ -${raw.rg_daily_loss_pct}%)`;
+        }
+      }
+
+      if (rgBlockAll) {
+        await log('warn', '리스크가드 매수 차단', rgBlockAll);
+      }
+
+      // ④ 동일 종목 재진입 쿨다운: 최근 손절된 종목은 일정 시간 어느 전략도 재매수 금지
+      const cooldownSymbols = new Set<string>();
+      if (raw.rg_symbol_cooldown_enabled) {
+        const cutoffIso = new Date(now - raw.rg_symbol_cooldown_hours * 3600_000).toISOString();
+        const { data: recentStops } = await sb.from('bnf_live_trades')
+          .select('symbol').eq('user_id', uid).eq('side', 'SELL_SL').gte('executed_at', cutoffIso);
+        for (const r of recentStops ?? []) cooldownSymbols.add(toKrCode((r as { symbol: string }).symbol));
+      }
+
+      // ③ 연속 손절 쿨다운: 전략별 최근 매도 N회가 모두 손실이면 그 전략만 일정 시간 매수 정지
+      const streakBlockedStrategies = new Map<string, string>(); // strategy_code -> 사유
+      if (!rgBlockAll && raw.rg_streak_enabled) {
+        for (const strat of strategies) {
+          const { data: recentSells } = await sb.from('bnf_live_trades')
+            .select('pnl, executed_at').eq('user_id', uid).eq('strategy_code', strat.strategy_code)
+            .neq('side', 'BUY').order('executed_at', { ascending: false }).limit(raw.rg_streak_losses);
+          const rows = (recentSells ?? []) as { pnl: number; executed_at: string }[];
+          if (rows.length >= raw.rg_streak_losses && rows.every((r) => Number(r.pnl) < 0)) {
+            const lastLossMs = new Date(rows[0].executed_at).getTime();
+            if (now - lastLossMs < raw.rg_streak_block_hours * 3600_000) {
+              streakBlockedStrategies.set(strat.strategy_code, `${raw.rg_streak_losses}연속 손절 쿨다운 (${raw.rg_streak_block_hours}시간)`);
+            }
+          }
+        }
+      }
+
       // ── 2. 매수 트리거 (전략 카드별 완전 독립 실행: 자기 주기·유니버스·최대보유수·예산) ──
       let buys = 0;
       const heldSymbols = new Set([
         ...brokerPositions.map((p) => p.symbol),
         ...(openPos ?? []).map((p) => toKrCode((p as { symbol: string }).symbol)),
+        ...cooldownSymbols,
       ]);
 
       for (const strat of strategies) {
+        if (rgBlockAll) break;
+        const streakReason = streakBlockedStrategies.get(strat.strategy_code);
+        if (streakReason) {
+          await log('info', '매수 스킵', `${strat.strategy_code}: ${streakReason}`);
+          continue;
+        }
         if (buys >= MAX_BUYS_PER_RUN) break;
         // 전략별 실행주기 스로틀링
         if (strat.last_run_at && now - new Date(strat.last_run_at).getTime() < Math.max(10, strat.interval_min) * 60_000 - 30_000) continue;

@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../context/AuthContext';
 import type { Profile, Strategy, AdminConfig } from '../lib/types';
 import StrategyPicker from '../components/StrategyPicker';
+import { getStrategy } from '../lib/strategies';
 
 type Tab = 'users' | 'strategies' | 'access' | 'report';
 
@@ -253,6 +254,15 @@ export default function AdminPage() {
                     <span className="badge bg-edge text-slate-300">
                       {s.regime === 'BULL' ? '📈 상승장' : s.regime === 'SIDEWAYS' ? '↔️ 횡보장' : s.regime === 'BEAR' ? '📉 하락장' : '🌐 공용'}
                     </span>
+                    {(() => {
+                      const risk = getStrategy(s.code).risk;
+                      const tone = risk >= 4 ? 'text-red-400' : risk === 3 ? 'text-amber-400' : 'text-profit';
+                      return (
+                        <span className={`badge bg-edge ${tone}`} title={`위험도 ${risk}/5`}>
+                          위험도 {'●'.repeat(risk)}{'○'.repeat(5 - risk)}
+                        </span>
+                      );
+                    })()}
                   </div>
                   <p className="text-sm text-slate-400 mt-1 leading-relaxed">{s.description}</p>
                   <div className="text-xs text-slate-500 mt-2">

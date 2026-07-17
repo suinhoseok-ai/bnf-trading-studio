@@ -291,6 +291,25 @@ create table if not exists public.bnf_trading_strategies (
 );
 -- 카드마다 매매 전략을 자유롭게 바꿀 수 있도록 (user_id, strategy_code) 유니크 제약은 사용하지 않음
 alter table public.bnf_trading_strategies drop constraint if exists bnf_trading_strategies_user_id_strategy_code_key;
+
+-- 리스크 가드 (자동매매 안전장치) — 신규 매수만 차단, 매도/청산은 이 설정과 무관하게 항상 동작
+alter table public.bnf_trading_settings
+  add column if not exists rg_daily_loss_enabled boolean not null default false,
+  add column if not exists rg_daily_loss_pct numeric not null default 3,       -- 전략 예산 합계 대비 %
+  add column if not exists rg_circuit_enabled boolean not null default true,
+  add column if not exists rg_circuit_drop_pct numeric not null default 5,     -- KOSPI 당일 등락률 기준
+  add column if not exists rg_circuit_block_hours numeric not null default 12,
+  add column if not exists rg_circuit_until timestamptz,                       -- 발동 시 차단 만료 시각 (서버가 갱신)
+  add column if not exists rg_streak_enabled boolean not null default false,
+  add column if not exists rg_streak_losses int not null default 3,
+  add column if not exists rg_streak_block_hours numeric not null default 24,
+  add column if not exists rg_symbol_cooldown_enabled boolean not null default true,
+  add column if not exists rg_symbol_cooldown_hours numeric not null default 24,
+  add column if not exists rg_bear_major_liquidate boolean not null default false; -- Phase A(국면엔진 v2) 연동 전까지는 저장만 되고 미작동
+
+-- 전략 카드별 "장세 자동필터" — 끄면 시장국면과 무관하게 항상 매수 스캔 (Phase A/B 연동 전까지는 저장만 되고 미작동)
+alter table public.bnf_trading_strategies
+  add column if not exists regime_filter_enabled boolean not null default true;
 alter table public.bnf_trading_strategies add column if not exists universe text not null default 'KOSPI';
 alter table public.bnf_trading_strategies add column if not exists interval_min int not null default 10;
 alter table public.bnf_trading_strategies add column if not exists max_positions int not null default 5;
