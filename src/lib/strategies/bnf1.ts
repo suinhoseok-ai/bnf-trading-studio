@@ -139,6 +139,7 @@ export const bnf1: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'SIDEWAYS', risk: 2,
+  regimeFit: { BULL_MAJOR: 15, BULL: 30, RANGE: 100, BEAR: 10 },
   lineStyles: [
     { key: 'ma20', color: '#f59e0b', width: 2, label: 'MA20 중심선' },
     { key: 'upper', color: '#22c55e', width: 1, label: '상단밴드 (+2σ)' },

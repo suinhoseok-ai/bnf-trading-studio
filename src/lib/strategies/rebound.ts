@@ -149,6 +149,7 @@ export const rebound: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'BEAR', risk: 4,
+  regimeFit: { RANGE: 15, BEAR: 85, BULL: 10 },
   lineStyles: [
     { key: 'ma5', color: '#f59e0b', width: 2, label: 'MA5' },
     { key: 'bbLower', color: '#22c55e', width: 1, label: '볼린저 하단' },

@@ -192,7 +192,7 @@ export default async () => {
     `KOSPI: ${regimeIcon(kConfirmed)} ${regimeLabel(kConfirmed)} (신뢰도 ${(kospi.confidence * 100).toFixed(0)}%${kStreak > 0 ? ` · 전환대기 ${kStreak}일` : ''})`,
     `KOSDAQ: ${regimeIcon(qConfirmed)} ${regimeLabel(qConfirmed)}`,
     `근거(KOSPI): ${metLabels || '(충족 조건 없음)'}`,
-    recommendLine(kConfirmed, strategyOrder),
+    recommendLine(kConfirmed, strategyOrder, kospi.confidence, kospi.microTags),
   ].join('\n') + riskBanner;
 
   let sent = 0;

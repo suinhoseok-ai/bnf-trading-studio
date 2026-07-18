@@ -158,6 +158,7 @@ export const disparity: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'BEAR', risk: 3,
+  regimeFit: { RANGE: 15, BEAR: 80, BULL: 10 },
   lineStyles: [
     { key: 'ema25', color: '#f59e0b', width: 2, label: 'EMA25' },
     { key: 'ma20', color: '#22c55e', width: 1, label: 'MA20' },

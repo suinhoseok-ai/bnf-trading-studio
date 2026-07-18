@@ -9,17 +9,17 @@ import { supabase } from '../lib/supabase';
 import { useStrategySelection } from '../hooks/useStrategySelection';
 import StrategyPicker from '../components/StrategyPicker';
 import Stars from '../components/Stars';
-import { judgeBothMarkets, regimeIcon, regimeLabel, type RegimeResult, type RegimeEvidence, type Regime, type RiskState, type CandleFetcher } from '../lib/marketRegime';
+import { judgeBothMarkets, regimeIcon, regimeLabel, type RegimeResult, type RegimeEvidence, type Regime, type RiskState, type MicroTag, type CandleFetcher } from '../lib/marketRegime';
 import { recommendForRegime } from '../lib/strategyRecommend';
 
 interface IndexQuote { label: string; price: number; changePct: number }
 /** 대시보드 표시용으로 정규화한 국면(확정=DB 컬럼 또는 클라이언트 후보, 근거=detail) */
-interface RegimeView { confirmed: Regime; candidate: Regime; confidence: number; streak: number; riskState: RiskState; evidence: RegimeEvidence[] }
+interface RegimeView { confirmed: Regime; candidate: Regime; confidence: number; streak: number; riskState: RiskState; evidence: RegimeEvidence[]; microTags: MicroTag[] }
 interface RegimeState { kospi: RegimeView; kosdaq: RegimeView; source: 'db' | 'client'; judgedAt?: string; session?: string }
 interface RegimeHistoryRow { trade_date: string; kospi_regime: Regime; kosdaq_regime: Regime }
 
 const viewFromResult = (r: RegimeResult): RegimeView => ({
-  confirmed: r.candidate, candidate: r.candidate, confidence: r.confidence, streak: 0, riskState: r.riskState, evidence: r.evidence,
+  confirmed: r.candidate, candidate: r.candidate, confidence: r.confidence, streak: 0, riskState: r.riskState, evidence: r.evidence, microTags: r.microTags,
 });
 
 const regimeFetcher: CandleFetcher = async (symbol, interval, range) => {
@@ -71,11 +71,13 @@ export default function DashboardPage() {
           confirmed: data.kospi_regime as Regime, candidate: (data.kospi_candidate as Regime) ?? (data.kospi_regime as Regime),
           confidence: Number(data.confidence ?? detail.kospi?.confidence ?? 0), streak: Number(data.confirmation_streak ?? 0),
           riskState: (data.risk_state as RiskState) ?? 'NORMAL', evidence: detail.kospi?.evidence ?? [],
+          microTags: detail.kospi?.microTags ?? [],
         };
         const kosdaq: RegimeView = {
           confirmed: data.kosdaq_regime as Regime, candidate: (data.kosdaq_candidate as Regime) ?? (data.kosdaq_regime as Regime),
           confidence: Number(detail.kosdaq?.confidence ?? 0), streak: Number(detail.kosdaqStreak ?? 0),
           riskState: detail.kosdaq?.riskState ?? 'NORMAL', evidence: detail.kosdaq?.evidence ?? [],
+          microTags: detail.kosdaq?.microTags ?? [],
         };
         setRegime({ kospi, kosdaq, source: 'db', judgedAt: data.judged_at as string, session: data.session as string });
         const { data: hist } = await supabase.from('bnf_market_regime')
@@ -354,7 +356,7 @@ export default function DashboardPage() {
 
           {(['kospi', 'kosdaq'] as const).map((key) => {
             const r = regime[key];
-            const rec = recommendForRegime(r.confirmed, strategyOrder);
+            const rec = recommendForRegime(r.confirmed, strategyOrder, r.confidence, r.microTags);
             return (
               <div key={key} className="bg-base rounded-lg p-3 border border-edge">
                 <div className="font-semibold text-ink mb-2 flex items-center gap-2 flex-wrap">
@@ -369,15 +371,33 @@ export default function DashboardPage() {
                     </div>
                   ))}
                 </div>
+                {r.microTags.length > 0 && (
+                  <div className="flex flex-wrap gap-1 mb-2">
+                    {r.microTags.map((t) => <span key={t} className="badge bg-edge text-slate-300 text-[10px]">{t}</span>)}
+                  </div>
+                )}
                 <div className="text-xs text-accent">
                   {rec.cashMode
-                    ? (r.confirmed === 'BEAR_MAJOR' ? '관망·현금화 (신규 롱 금지)' : '전환구간 — 기존 포지션 관리, 신규 진입 대기')
-                    : <>
-                        1순위: {rec.primary ? rec.primary.name.split('·')[0].trim() : '없음(위험도 기준 미충족)'}
-                        {rec.secondary && ` · 2순위: ${rec.secondary.name.split('·')[0].trim()}`}
-                        {r.confirmed === 'BEAR' && ' · 현금 비중 확대 권고'}
-                      </>}
+                    ? rec.defenseNote ?? '추천 가능한 전략이 없습니다 (60점 기준 미달)'
+                    : rec.defenseNote
+                      ? <>{rec.defenseNote}{rec.secondary && ` (조건부 2순위: ${rec.secondary.name.split('·')[0].trim()})`}</>
+                      : <>
+                          1순위: {rec.primary ? rec.primary.name.split('·')[0].trim() : '없음'}
+                          {rec.secondary && ` · 2순위: ${rec.secondary.name.split('·')[0].trim()}`}
+                        </>}
                 </div>
+                {rec.scores.length > 0 && (
+                  <details className="text-xs text-slate-500 mt-1">
+                    <summary className="cursor-pointer hover:text-slate-300">점수 구성 보기</summary>
+                    <div className="mt-1 space-y-0.5">
+                      {rec.scores.slice(0, 5).map((s) => (
+                        <div key={s.code}>
+                          {s.name.split('·')[0].trim()}: 적합도{s.regimeFit} {s.microCorrection >= 0 ? '+' : ''}{s.microCorrection} -{s.penalty} = <b className="text-slate-300">{s.total.toFixed(0)}점</b>
+                        </div>
+                      ))}
+                    </div>
+                  </details>
+                )}
               </div>
             );
           })}

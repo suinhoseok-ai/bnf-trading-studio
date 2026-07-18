@@ -153,6 +153,7 @@ export const pullback: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'BULL', risk: 2,
+  regimeFit: { BULL_MAJOR: 80, BULL: 100, RANGE: 25 },
   lineStyles: [
     { key: 'ma5', color: '#ef4444', width: 1, label: 'MA5' },
     { key: 'ma10', color: '#f59e0b', width: 1, label: 'MA10' },

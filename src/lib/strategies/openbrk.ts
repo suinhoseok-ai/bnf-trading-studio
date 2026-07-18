@@ -169,6 +169,7 @@ export const openbrk: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'BULL', risk: 5,
+  regimeFit: { BULL_MAJOR: 85, BULL: 75, RANGE: 10 },
   lineStyles: [
     { key: 'vwap', color: '#f59e0b', width: 2, label: 'VWAP (당일 누적)' },
   ],

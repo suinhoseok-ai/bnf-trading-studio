@@ -6,7 +6,7 @@
 // - coarseRegime(): 6국면을 기존 전략 메타(BULL/SIDEWAYS/BEAR)의 3분류로 사상 (게이트·추천 호환용).
 // 캔들 fetcher를 주입받아 서버(Yahoo 직접)와 클라이언트(/api/yahoo 프록시) 양쪽에서 재사용한다.
 import type { Candle } from './types';
-import { smaAt, adxArr, atrArr } from './strategies/engine';
+import { smaAt, stddevAt, adxArr, atrArr, rsiSimple } from './strategies/engine';
 
 export type Regime = 'BULL_MAJOR' | 'BULL' | 'RANGE' | 'BEAR' | 'BEAR_MAJOR' | 'TRANSITION';
 export type CoarseRegime = 'BULL' | 'SIDEWAYS' | 'BEAR';
@@ -35,6 +35,11 @@ export interface RegimeMetrics {
   maxTrendScore: number;
 }
 
+/** 미세 시장상태 태그 (설계서 08 §6 축약: 8종). 복수 동시 성립 가능. */
+export type MicroTag =
+  | 'TREND_ACCELERATION' | 'VOLATILITY_COMPRESSION' | 'ORDERLY_PULLBACK' | 'RANGE_REVERSION'
+  | 'OVERSOLD_PANIC' | 'TREND_BREAKDOWN' | 'OVERHEATED' | 'VOLATILITY_SHOCK';
+
 export interface RegimeResult {
   market: Market;
   candidate: Regime;
@@ -42,6 +47,7 @@ export interface RegimeResult {
   riskState: RiskState;
   evidence: RegimeEvidence[];
   metrics: RegimeMetrics;
+  microTags: MicroTag[];
   price: number;
   /** classify 시점의 각 국면 조건 충족 여부 (stabilize의 '직전 확정 유지' 판단에 사용) */
   flags: Record<Exclude<Regime, 'TRANSITION'>, boolean>;
@@ -69,6 +75,102 @@ const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v
 function rocAt(closes: number[], period: number, i: number): number | null {
   if (i < period || closes[i - period] <= 0) return null;
   return closes[i] / closes[i - period] - 1;
+}
+
+function median(vals: number[]): number | null {
+  if (vals.length === 0) return null;
+  const s = [...vals].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid] : (s[mid - 1] + s[mid]) / 2;
+}
+
+/**
+ * 미세 시장상태 태그 8종 (설계서 08 §6.2 축약). 복수 성립 가능, 조건 불충분이면 빈 배열.
+ */
+function computeMicroTags(
+  candles: Candle[], i: number,
+  adx: (number | null)[], plusDI: (number | null)[], minusDI: (number | null)[], atr: (number | null)[],
+): MicroTag[] {
+  const closes = candles.map((c) => c.close);
+  const tags: MicroTag[] = [];
+  if (i < 20) return tags;
+
+  const sma20 = smaAt(closes, 20, i);
+  const std20 = stddevAt(closes, 20, i);
+  const rsi14 = rsiSimple(closes, 14)[i];
+  const roc20 = rocAt(closes, 20, i);
+  const roc20Prev = i >= 23 ? rocAt(closes, 20, i - 3) : null;
+  const adxNow = adx[i], plusNow = plusDI[i], minusNow = minusDI[i];
+  const atrNow = atr[i];
+  const atrPctNow = atrNow != null && closes[i] > 0 ? atrNow / closes[i] : null;
+  const changePct = i >= 1 && closes[i - 1] > 0 ? closes[i] / closes[i - 1] - 1 : 0;
+
+  // TREND_ACCELERATION: ADX≥25, +DI>-DI, ROC20 상승 중
+  if (adxNow != null && adxNow >= 25 && plusNow != null && minusNow != null && plusNow > minusNow &&
+      roc20 != null && roc20Prev != null && roc20 > roc20Prev) {
+    tags.push('TREND_ACCELERATION');
+  }
+
+  // VOLATILITY_COMPRESSION: 밴드폭 백분위(120) ≤20%, ATR%가 50일 평균의 85% 미만
+  if (i >= 119) {
+    const widths: number[] = [];
+    for (let j = i - 119; j <= i; j++) {
+      const m = smaAt(closes, 20, j), sd = stddevAt(closes, 20, j);
+      if (m != null && sd != null && m !== 0) widths.push((4 * sd) / m); // (mid+2σ)-(mid-2σ) = 4σ
+    }
+    if (widths.length >= 60 && sma20 != null && std20 != null && sma20 !== 0) {
+      const curWidth = (4 * std20) / sma20;
+      const below = widths.filter((w) => w <= curWidth).length;
+      const pctRank = below / widths.length;
+      const atrPctArr = atr.map((v, idx) => (v != null && closes[idx] > 0 ? v / closes[idx] : null));
+      const atrAvg50 = smaAt(atrPctArr, 50, i);
+      if (pctRank <= 0.20 && atrPctNow != null && atrAvg50 != null && atrPctNow < atrAvg50 * 0.85) {
+        tags.push('VOLATILITY_COMPRESSION');
+      }
+    }
+  }
+
+  // ORDERLY_PULLBACK: 50일선 위 + RSI 38~52 + 종가가 20일선 ±1ATR 이내
+  const sma50Now = smaAt(closes, 50, i);
+  if (sma50Now != null && closes[i] > sma50Now && rsi14 != null && rsi14 >= 38 && rsi14 <= 52 &&
+      sma20 != null && atrNow != null && Math.abs(closes[i] - sma20) <= atrNow) {
+    tags.push('ORDERLY_PULLBACK');
+  }
+
+  // RANGE_REVERSION: ADX<20, |ROC20|≤3%
+  if (adxNow != null && adxNow < 20 && roc20 != null && Math.abs(roc20) <= 0.03) {
+    tags.push('RANGE_REVERSION');
+  }
+
+  // OVERSOLD_PANIC: RSI≤20 + 당일 3% 이상 급락 (과매도 투매)
+  if (rsi14 != null && rsi14 <= 20 && changePct <= -0.03) {
+    tags.push('OVERSOLD_PANIC');
+  }
+
+  // TREND_BREAKDOWN: -DI>+DI, ADX≥25, 200일선 아래
+  const sma200Now = smaAt(closes, 200, i);
+  if (plusNow != null && minusNow != null && minusNow > plusNow && adxNow != null && adxNow >= 25 &&
+      sma200Now != null && closes[i] < sma200Now) {
+    tags.push('TREND_BREAKDOWN');
+  }
+
+  // OVERHEATED: RSI≥75 또는 20일선 이격 2.5ATR 초과
+  if ((rsi14 != null && rsi14 >= 75) || (sma20 != null && atrNow != null && atrNow > 0 && Math.abs(closes[i] - sma20) > 2.5 * atrNow)) {
+    tags.push('OVERHEATED');
+  }
+
+  // VOLATILITY_SHOCK: ATR%가 최근 60봉 중앙값의 1.8배 초과
+  if (i >= 59) {
+    const atrPctWindow: number[] = [];
+    for (let j = i - 59; j <= i; j++) {
+      const v = atr[j];
+      if (v != null && closes[j] > 0) atrPctWindow.push(v / closes[j]);
+    }
+    const med = median(atrPctWindow);
+    if (med != null && atrPctNow != null && atrPctNow > med * 1.8) tags.push('VOLATILITY_SHOCK');
+  }
+
+  return tags;
 }
 
 /**
@@ -112,6 +214,8 @@ export function classifyFromCandles(candles: Candle[], market: Market, breadth: 
     b(roc60 != null && roc60 < 0, 1) +
     b(plusNow != null && minusNow != null && minusNow > plusNow, 1) +
     (hasBreadth ? b((breadth as number) <= 0.5, 1) : 0);
+
+  const microTags = computeMicroTags(candles, i, adx, plusDI, minusDI, atr);
 
   const metrics: RegimeMetrics = {
     close, sma50, sma200, slope200, roc60, roc120,
@@ -164,7 +268,7 @@ export function classifyFromCandles(candles: Candle[], market: Market, breadth: 
 
   const evidence = buildEvidence(candidate, metrics);
 
-  return { market, candidate, confidence, riskState, evidence, metrics, price: close, flags };
+  return { market, candidate, confidence, riskState, evidence, metrics, microTags, price: close, flags };
 }
 
 function buildEvidence(regime: Regime, m: RegimeMetrics): RegimeEvidence[] {

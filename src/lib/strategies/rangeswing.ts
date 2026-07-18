@@ -173,6 +173,7 @@ export const rangeswing: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'SIDEWAYS', risk: 3,
+  regimeFit: { BULL_MAJOR: 10, BULL: 25, RANGE: 95, BEAR: 10 },
   lineStyles: [
     { key: 'boxTop', color: '#22c55e', width: 2, label: '박스 상단' },
     { key: 'boxBottom', color: '#ef4444', width: 2, label: '박스 하단' },

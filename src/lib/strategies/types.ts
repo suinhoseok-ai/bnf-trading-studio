@@ -70,8 +70,11 @@ export interface LineStyle {
 /** 캔들 조회 함수 (클라이언트/서버가 각자 구현을 주입) */
 export type CandleFetcher = (symbol: string, interval: Interval, range: string) => Promise<Candle[]>;
 
-/** 전략이 가장 잘 작동하는 시장국면 */
+/** 전략이 가장 잘 작동하는 시장국면 (3분류 — 표시용, 게이트는 regimeFit 사용) */
 export type StrategyRegime = 'BULL' | 'SIDEWAYS' | 'BEAR' | 'ANY';
+
+/** 5국면 적합도 맵의 키 (TRANSITION 제외 — 전 전략 공통으로 항상 0/차단) */
+export type RegimeFitKey = 'BULL_MAJOR' | 'BULL' | 'RANGE' | 'BEAR' | 'BEAR_MAJOR';
 
 /** 전략 모듈 — 각 전략이 구현 */
 export interface StrategyModule {
@@ -82,7 +85,9 @@ export interface StrategyModule {
   range: string; // 기본 조회 기간
   positionPct: number; // 진입 비중 (% of cash)
   params: Record<string, number>;
-  regime: StrategyRegime; // 적정 장세 (관리자 화면·추천 로직에 사용)
+  regime: StrategyRegime; // 적정 장세 (관리자 화면·구 게이트 표시용)
+  /** 5국면별 적합도 0~100 (미기재 국면=0=매수 차단). trader.mts 매수 게이트·전략선정엔진이 사용. */
+  regimeFit: Partial<Record<RegimeFitKey, number>>;
   risk: 1 | 2 | 3 | 4 | 5; // 위험도 (1=낮음 5=높음, 추천 로직이 risk<=3만 추천)
   lineStyles: LineStyle[]; // 차트에 그릴 라인
   colHeaders: string[]; // 스캐너 지표 컬럼 헤더

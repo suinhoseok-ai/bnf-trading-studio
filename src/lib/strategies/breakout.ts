@@ -191,6 +191,7 @@ export const breakout: StrategyModule = {
   positionPct: PARAMS.positionPct,
   params: PARAMS,
   regime: 'BULL', risk: 3,
+  regimeFit: { BULL_MAJOR: 100, BULL: 85, RANGE: 15 },
   lineStyles: [
     { key: 'high60', color: '#f59e0b', width: 2, label: '60일 저항선' },
     { key: 'ma10', color: '#22c55e', width: 1, label: 'MA10 (1차 트레일)' },
